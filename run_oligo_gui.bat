@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-python oligo_utils.py --gui
+python -m tools_for_pharma.oligo.app --gui
 if errorlevel 1 pause

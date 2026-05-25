@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-python util_oligo_offtarget.py --gui
+python -m tools_for_pharma.oligo.off_target --gui
 if errorlevel 1 pause

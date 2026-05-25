@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-python qPCR_extract_excel_table.py --gui
+python -m tools_for_pharma.qpcr.extract --gui
 if errorlevel 1 pause
