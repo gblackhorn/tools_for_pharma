@@ -124,6 +124,23 @@ Plot modes:
 By default, plots are saved beside the Excel file in a subfolder based on the
 workbook name. Existing generated examples have been moved to `outputs/plots/`.
 
+For a simple two-column table where the first column is `Group` and the second
+column contains values like `0.72 +/- 0.13` or `0.72 ± 0.13`, make a grouped bar
+plot directly:
+
+```text
+run_simple_group_plot_gui.bat
+```
+
+Or run it from PowerShell:
+
+```powershell
+python -m tools_for_pharma.qpcr.simple_group_plot -i "group_plot.xlsx" --title "MSH3 remaining on D33 relative to baseline in Liver" --y-label "Remaining relative to baseline"
+```
+
+Labels such as `G1-baseline`, `G1-2mpk D33`, and `G1-5mpk D33` are grouped under
+`G1`; the text after the hyphen becomes the bar label in the legend.
+
 ## qPCR Reference-Gene QC
 
 This exploratory QC workflow checks whether reference genes look stable across
