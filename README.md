@@ -86,6 +86,79 @@ Open the transcript sequence GUI:
 run_util_transcript_sequence_gui.bat
 ```
 
+### NCBI Transcript / BLAST Checks
+
+For AS oligo checks against a specific transcript, provide the AS sequence and
+an NM/XM/NR/XR accession. The tool fetches the transcript through NCBI EFetch and
+scans for the AS reverse-complement target.
+
+Use the GUI for an Excel AS table:
+
+```text
+run_ncbi_blast_gui.bat
+```
+
+The GUI lets you choose the input workbook, AS sequence/name columns, and the
+transcript source: use a `target_accession` column, type one RefSeq accession for
+all rows, or choose a local transcript FASTA/text file. Results are saved beside
+the input workbook as `<input filename>_ncbi_blast_results.xlsx`.
+
+```powershell
+python -m tools_for_pharma.oligo.ncbi_blast --as-sequence "AUGCUACGGAUCUAGCUAGCU" --target-accession NM_000000.0 --output transcript_scan.csv
+```
+
+You can also compare against a local FASTA/plain transcript:
+
+```powershell
+python -m tools_for_pharma.oligo.ncbi_blast --as-sequence "AUGCUACGGAUCUAGCUAGCU" --target-file transcript.fasta --max-mismatches 3
+```
+
+The local scan output includes both the transcript window in transcript
+orientation and `transcript_match_as_5to3`, which is reverse-complemented back to
+AS orientation so it can be compared directly with your AS sequence.
+
+For oligo risk review, you can scan full AS plus custom subregions:
+
+```powershell
+python -m tools_for_pharma.oligo.ncbi_blast --as-table as_sequences.xlsx --as-column antisense --as-name-column oligo_id --target-file transcript.fasta --scan-region full --scan-region seed:2-8 --scan-region core:2-18 --result-workbook as_review.xlsx
+```
+
+For broader NCBI BLAST URL API searches, use `--blast` or `--blast-only`:
+
+```powershell
+python -m tools_for_pharma.oligo.ncbi_blast --as-sequence "AUGCUACGGAUCUAGCUAGCU" --blast-only --database refseq_rna --blast-output blast_hits.csv
+```
+
+Batch BLAST can read multiple AS sequences from FASTA/plain text or from an
+Excel/CSV table:
+
+```powershell
+python -m tools_for_pharma.oligo.ncbi_blast --as-file as_sequences.fasta --blast-only --database refseq_rna --blast-output blast_hits.csv
+python -m tools_for_pharma.oligo.ncbi_blast --as-table as_sequences.xlsx --as-column antisense --as-name-column oligo_id --blast-only --database refseq_rna --blast-output blast_hits.csv
+```
+
+Short AS queries are submitted as multi-FASTA batches instead of one BLAST job
+per AS sequence. The default batch cap is 1,000 total AS bases per BLAST request.
+The output CSV includes the BLAST RID and the query ID for each hit.
+
+For batch work, the preferred output is an Excel result workbook:
+
+```powershell
+python -m tools_for_pharma.oligo.ncbi_blast --as-table as_sequences.xlsx --as-column antisense --as-name-column oligo_id --blast-only --database refseq_rna --result-workbook as_blast_results.xlsx
+```
+
+The workbook contains `input_queries`, `local_transcript_scan`,
+`blast_hits_raw`, `blast_hits_filtered`, `blast_batches`, and `run_metadata`.
+If you use `--as-file` or `--as-table` without CSV output paths, the tool writes
+`<input>_ncbi_blast_results.xlsx` by default. Use `--cache-dir` to reuse fetched
+NM/XM transcript FASTA files across runs.
+
+NCBI asks API users to include `tool` and `email`, avoid contacting BLAST more
+than once every 10 seconds, and avoid polling a single RID more than once per
+minute. The tool uses safer defaults: at least 15 seconds between NCBI requests
+and at least 75 seconds between status checks for the same RID. The default
+contact email is `da.guo@argobiopharma.com`; pass `--email` to override it.
+
 ## qPCR Table Extraction And Plotting
 
 These tools turn qPCR Excel report tables into plot-ready data, then make bar
@@ -140,6 +213,20 @@ python -m tools_for_pharma.qpcr.simple_group_plot -i "group_plot.xlsx" --title "
 
 Labels such as `G1-baseline`, `G1-2mpk D33`, and `G1-5mpk D33` are grouped under
 `G1`; the text after the hyphen becomes the bar label in the legend.
+
+The same tool also supports wider tables with `Dose`, `Group`, and multiple
+`Time-...` columns. For example, with columns such as `Dose (mpk)`, `Group`,
+`Time-baseline`, `Time-D8`, and `Time-D29`, the default mode creates:
+
+- one plot with timepoints on the x-axis and compound+dose bars
+- one plot per compound comparing doses across time
+- one plot per dose comparing compounds across time
+
+To create only the all-variable plot:
+
+```powershell
+python -m tools_for_pharma.qpcr.simple_group_plot -i "group_plot.xlsx" --plot-mode all-variables
+```
 
 ## qPCR Reference-Gene QC
 

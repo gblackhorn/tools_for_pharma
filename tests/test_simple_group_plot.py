@@ -5,6 +5,7 @@ import pandas as pd
 from tools_for_pharma.qpcr.simple_group_plot import (
     parse_mean_sem,
     prepare_plot_data,
+    prepare_wide_time_data,
     read_group_table,
 )
 
@@ -67,3 +68,45 @@ def test_read_group_table_detects_title_and_header_rows(tmp_path) -> None:
     assert table.attrs["title"] == "MSH3 remaining on D33 relative to baseline in Liver"
     assert table.columns.tolist() == ["Group", "(Mean SEM)"]
     assert table["Group"].tolist() == ["G1-baseline", "G1-2mpk D33"]
+
+
+def test_prepare_wide_time_data_unpivots_dose_group_and_timepoints() -> None:
+    table = pd.DataFrame(
+        {
+            "Dose (mpk)": [2, 5],
+            "Group": ["G1 AD12111", "G1 AD12111"],
+            "Time-baseline": ["1 +/- 0", "1 +/- 0"],
+            "Time-D8": ["0.4 +/- 0.06", "0.44 +/- 0.02"],
+            "Time-D29": ["0.42 +/- 0.03", "0.34 +/- 0.02"],
+        }
+    )
+
+    summary = prepare_wide_time_data(table)
+
+    assert summary["Compound"].tolist() == [
+        "G1 AD12111",
+        "G1 AD12111",
+        "G1 AD12111",
+        "G1 AD12111",
+        "G1 AD12111",
+        "G1 AD12111",
+    ]
+    assert summary["Dose"].tolist() == [
+        "2 mpk",
+        "2 mpk",
+        "2 mpk",
+        "5 mpk",
+        "5 mpk",
+        "5 mpk",
+    ]
+    assert summary["Timepoint"].tolist() == [
+        "baseline",
+        "D8",
+        "D29",
+        "baseline",
+        "D8",
+        "D29",
+    ]
+    assert summary["Compound dose"].tolist()[0] == "G1 AD12111 | 2 mpk"
+    assert summary["Mean"].tolist() == [1.0, 0.4, 0.42, 1.0, 0.44, 0.34]
+    assert summary["SEM"].tolist() == [0.0, 0.06, 0.03, 0.0, 0.02, 0.02]
