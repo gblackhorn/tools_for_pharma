@@ -42,6 +42,7 @@ DEFAULT_EXPECT = "1000"
 DEFAULT_WORD_SIZE = 7
 DEFAULT_HITLIST_SIZE = 50
 DEFAULT_MAX_MISMATCHES = 3
+DEFAULT_CLOSEST_MATCHES = 10
 DEFAULT_BATCH_BASES = 1000
 DEFAULT_POLL_SECONDS = 75
 DEFAULT_REQUEST_SECONDS = 15
@@ -693,7 +694,7 @@ def scan_antisense_against_transcript(
     transcript_name: str = "target_transcript",
     antisense_name: str = "antisense_query",
     scan_region: AntisenseRegion | None = None,
-    max_mismatches: int = DEFAULT_MAX_MISMATCHES,
+    max_mismatches: int | None = DEFAULT_MAX_MISMATCHES,
 ) -> list[TranscriptMatch]:
     """Find reverse-complement antisense target windows in a transcript.
 
@@ -712,7 +713,7 @@ def scan_antisense_against_transcript(
     for start_index in range(0, len(transcript) - len(target) + 1):
         window = transcript[start_index : start_index + len(target)]
         mismatches = mismatch_positions(target, window)
-        if len(mismatches) <= max_mismatches:
+        if max_mismatches is None or len(mismatches) <= max_mismatches:
             transcript_match_as = get_complementary_sequence(window, reverse=True)
             matches.append(
                 TranscriptMatch(
@@ -779,6 +780,124 @@ def transcript_matches_to_csv(matches: Iterable[TranscriptMatch]) -> str:
                 ";".join(str(position) for position in match.as_mismatch_positions_1based),
             ]
         )
+    return output.getvalue()
+
+
+def terminal_table(headers: list[str], rows: list[list[object]]) -> str:
+    """Return a compact plain-text table for quick terminal review."""
+    if not rows:
+        return ""
+    text_rows = [[str(value) for value in row] for row in rows]
+    widths = [
+        max(len(header), *(len(row[index]) for row in text_rows))
+        for index, header in enumerate(headers)
+    ]
+    output = io.StringIO()
+    output.write("  ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+    output.write("\n")
+    output.write("  ".join("-" * width for width in widths))
+    output.write("\n")
+    for row in text_rows:
+        output.write("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
+        output.write("\n")
+    return output.getvalue().rstrip()
+
+
+def transcript_match_terminal_table(matches: Iterable[TranscriptMatch]) -> str:
+    headers = [
+        "AS",
+        "region",
+        "start",
+        "end",
+        "mm",
+        "target_5to3",
+        "matched_as_5to3",
+        "mm_pos",
+        "as_mm_pos",
+    ]
+    rows = [
+        [
+            match.antisense_name,
+            match.scan_region,
+            match.transcript_start,
+            match.transcript_end,
+            match.mismatches,
+            match.transcript_window_5to3,
+            match.transcript_match_as_5to3,
+            ";".join(str(position) for position in match.mismatch_positions_1based) or "-",
+            ";".join(str(position) for position in match.as_mismatch_positions_1based) or "-",
+        ]
+        for match in matches
+    ]
+    return terminal_table(headers, rows)
+
+
+def closest_transcript_matches(matches: Iterable[TranscriptMatch], limit: int) -> list[TranscriptMatch]:
+    if limit < 1:
+        raise ValueError("--closest must be 1 or greater.")
+    return sorted(
+        matches,
+        key=lambda match: (
+            match.mismatches,
+            match.transcript_start,
+            match.antisense_name,
+            match.scan_region,
+        ),
+    )[:limit]
+
+
+def format_transcript_matches_for_terminal(
+    matches: Iterable[TranscriptMatch],
+    queries: list[AntisenseQuery],
+    scan_regions: list[AntisenseRegion],
+    max_mismatches: int,
+) -> str:
+    """Format local transcript matches as a readable terminal summary."""
+    match_list = list(matches)
+    transcript_names = sorted({match.transcript_name for match in match_list})
+    output = io.StringIO()
+    output.write("Local transcript scan\n")
+    output.write(f"AS queries: {len(queries)}\n")
+    if len(queries) == 1:
+        query = queries[0]
+        output.write(f"AS name: {query.name}\n")
+        output.write(f"AS sequence: {normalize_rna(query.sequence_5to3)}\n")
+    if transcript_names:
+        if len(transcript_names) == 1:
+            output.write(f"Transcript: {transcript_names[0]}\n")
+        else:
+            output.write(f"Transcripts: {len(transcript_names)}\n")
+    output.write(f"Scan regions: {', '.join(region.name for region in scan_regions)}\n")
+    output.write(f"Max mismatches: {max_mismatches}\n")
+    output.write(f"Matches: {len(match_list)}\n")
+
+    if not match_list:
+        output.write("\nNo local transcript matches found within mismatch threshold.")
+        return output.getvalue()
+
+    output.write("\n")
+    output.write(transcript_match_terminal_table(match_list))
+    return output.getvalue()
+
+
+def format_closest_transcript_matches_for_terminal(
+    matches: Iterable[TranscriptMatch],
+    closest: int,
+    max_mismatches: int,
+) -> str:
+    match_list = list(matches)
+    output = io.StringIO()
+    output.write("\nClosest transcript windows\n")
+    output.write(f"Showing: {len(match_list)}")
+    if len(match_list) == closest:
+        output.write(f" of top {closest}")
+    output.write("\n")
+    output.write(f"These are not filtered by --max-mismatches {max_mismatches}.\n")
+    if not match_list:
+        output.write("\nNo transcript windows available.")
+        return output.getvalue()
+    output.write("\n")
+    output.write(transcript_match_terminal_table(match_list))
     return output.getvalue()
 
 
@@ -1470,6 +1589,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, help="Write local scan CSV to this path.")
     parser.add_argument("--blast-output", type=Path, help="Write BLAST CSV to this path.")
     parser.add_argument(
+        "--terminal",
+        action="store_true",
+        help=(
+            "Print a readable local transcript scan summary to the terminal. "
+            "For one --as-sequence scan without --output, this is the default."
+        ),
+    )
+    parser.add_argument(
+        "--stdout-csv",
+        action="store_true",
+        help="Print local transcript scan CSV to the terminal instead of the quick summary.",
+    )
+    parser.add_argument(
+        "--closest",
+        type=int,
+        help=(
+            "Print the N closest local transcript windows in terminal output, "
+            "without applying --max-mismatches. In quick terminal mode, the tool "
+            f"automatically shows the top {DEFAULT_CLOSEST_MATCHES} closest windows "
+            "when no matches pass --max-mismatches."
+        ),
+    )
+    parser.add_argument(
         "--result-workbook",
         type=Path,
         help=(
@@ -1503,7 +1645,10 @@ def run_local_scan(
     args: argparse.Namespace,
     queries: list[AntisenseQuery],
     scan_regions: list[AntisenseRegion],
+    max_mismatches: int | None = DEFAULT_MAX_MISMATCHES,
 ) -> list[TranscriptMatch]:
+    if max_mismatches == DEFAULT_MAX_MISMATCHES:
+        max_mismatches = args.max_mismatches
     matches = []
     shared_transcript: tuple[str, str] | None = None
     if not args.target_accession_column:
@@ -1538,7 +1683,7 @@ def run_local_scan(
                     transcript_name=transcript_name,
                     antisense_name=query.name,
                     scan_region=scan_region,
-                    max_mismatches=args.max_mismatches,
+                    max_mismatches=max_mismatches,
                 )
             )
     return matches
@@ -1653,18 +1798,68 @@ def main() -> int:
             args.target_accession_column = "target_accession"
         scan_regions = parse_scan_regions(args.scan_region)
         local_matches: list[TranscriptMatch] = []
+        closest_matches: list[TranscriptMatch] = []
         blast_outputs: list[BlastBatchResult] = []
         if args.blast_only:
             args.blast = True
         if not args.blast_only:
-            local_matches = run_local_scan(args, queries, scan_regions)
+            if args.closest is not None and args.closest < 1:
+                raise ValueError("--closest must be 1 or greater.")
+            result_workbook = default_result_workbook(args)
+            quick_terminal_default = (
+                args.as_sequence
+                and len(queries) == 1
+                and not args.output
+                and not result_workbook
+                and not args.stdout_csv
+            )
+            print_terminal = args.terminal or args.closest is not None or quick_terminal_default
+            prepare_closest_matches = args.closest is not None or print_terminal
+            if prepare_closest_matches:
+                all_local_matches = run_local_scan(args, queries, scan_regions, max_mismatches=None)
+                local_matches = [
+                    match
+                    for match in all_local_matches
+                    if match.mismatches <= args.max_mismatches
+                ]
+                closest_limit = args.closest or DEFAULT_CLOSEST_MATCHES
+                closest_matches = closest_transcript_matches(all_local_matches, closest_limit)
+            else:
+                local_matches = run_local_scan(args, queries, scan_regions)
             csv_text = transcript_matches_to_csv(local_matches)
+            show_closest_matches = args.closest is not None or (print_terminal and not local_matches)
+            closest_limit = args.closest or DEFAULT_CLOSEST_MATCHES
             if args.output:
                 write_text(args.output, csv_text)
                 print(f"Wrote local transcript scan to: {args.output}")
-            elif not default_result_workbook(args):
+            if print_terminal:
+                print(
+                    format_transcript_matches_for_terminal(
+                        local_matches,
+                        queries,
+                        scan_regions,
+                        args.max_mismatches,
+                    )
+                )
+                if show_closest_matches:
+                    print(
+                        format_closest_transcript_matches_for_terminal(
+                            closest_matches,
+                            closest_limit,
+                            args.max_mismatches,
+                        )
+                    )
+            elif not args.output and not result_workbook:
                 print(csv_text, end="")
-            if not local_matches:
+                if show_closest_matches:
+                    print(
+                        format_closest_transcript_matches_for_terminal(
+                            closest_matches,
+                            closest_limit,
+                            args.max_mismatches,
+                        )
+                    )
+            if not local_matches and not print_terminal:
                 print("No local transcript matches found within mismatch threshold.", file=sys.stderr)
 
         if args.blast:

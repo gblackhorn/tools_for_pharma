@@ -4,6 +4,9 @@ from tools_for_pharma.oligo.ncbi_blast import (
     AntisenseRegion,
     AntisenseQuery,
     batch_antisense_queries,
+    closest_transcript_matches,
+    format_closest_transcript_matches_for_terminal,
+    format_transcript_matches_for_terminal,
     input_query_rows,
     parse_blast_field,
     parse_plain_antisense_lines,
@@ -67,6 +70,52 @@ def test_transcript_matches_to_csv_includes_expected_columns() -> None:
     assert "transcript_name,antisense_name,scan_region,as_region_start" in text
     assert "transcript_window_5to3,transcript_match_as_5to3" in text
     assert "test_transcript,antisense_query,full,1,4,AUGC,AUGC,GCAU,3,6,0,GCAU,AUGC,," in text
+
+
+def test_format_transcript_matches_for_terminal_shows_quick_summary() -> None:
+    query = AntisenseQuery("AS_demo", "AUGC")
+    region = AntisenseRegion("full")
+    matches = scan_antisense_against_transcript(
+        antisense_5to3=query.sequence_5to3,
+        transcript_sequence="GGGCAUTTT",
+        transcript_name="test_transcript",
+        antisense_name=query.name,
+        scan_region=region,
+        max_mismatches=0,
+    )
+
+    text = format_transcript_matches_for_terminal(matches, [query], [region], max_mismatches=0)
+
+    assert "Local transcript scan" in text
+    assert "AS name: AS_demo" in text
+    assert "Transcript: test_transcript" in text
+    assert "Matches: 1" in text
+    assert "start" in text
+    assert "matched_as_5to3" in text
+    assert "3" in text
+    assert "AUGC" in text
+
+
+def test_closest_transcript_matches_can_ignore_mismatch_cutoff() -> None:
+    matches = scan_antisense_against_transcript(
+        antisense_5to3="AUGC",
+        transcript_sequence="GGGAAAUGGCAUTTT",
+        transcript_name="test_transcript",
+        max_mismatches=None,
+    )
+
+    closest = closest_transcript_matches(matches, 2)
+    text = format_closest_transcript_matches_for_terminal(
+        closest,
+        closest=2,
+        max_mismatches=0,
+    )
+
+    assert len(closest) == 2
+    assert closest[0].mismatches == 0
+    assert closest[1].mismatches > 0
+    assert "Closest transcript windows" in text
+    assert "not filtered by --max-mismatches 0" in text
 
 
 def test_scan_antisense_against_transcript_supports_subregions() -> None:

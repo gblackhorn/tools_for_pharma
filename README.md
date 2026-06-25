@@ -104,6 +104,17 @@ all rows, or choose a local transcript FASTA/text file. Results are saved beside
 the input workbook as `<input filename>_ncbi_blast_results.xlsx`.
 
 ```powershell
+python -m tools_for_pharma.oligo.ncbi_blast --as-sequence "AUGCUACGGAUCUAGCUAGCU" --target-accession NM_000000.0
+```
+
+For a single AS sequence and target accession, omitting `--output` prints a
+readable quick-look summary directly in the terminal. Add `--output` when you
+want to save the same local scan results as CSV. If no local matches are found
+within the default `--max-mismatches 3`, the quick-look output automatically
+shows the 10 closest transcript windows so you can still inspect the nearest
+sites:
+
+```powershell
 python -m tools_for_pharma.oligo.ncbi_blast --as-sequence "AUGCUACGGAUCUAGCUAGCU" --target-accession NM_000000.0 --output transcript_scan.csv
 ```
 
@@ -115,7 +126,17 @@ python -m tools_for_pharma.oligo.ncbi_blast --as-sequence "AUGCUACGGAUCUAGCUAGCU
 
 The local scan output includes both the transcript window in transcript
 orientation and `transcript_match_as_5to3`, which is reverse-complemented back to
-AS orientation so it can be compared directly with your AS sequence.
+AS orientation so it can be compared directly with your AS sequence. If you want
+both a CSV file and the terminal summary, add `--terminal`; if you prefer raw CSV
+printed to the terminal, add `--stdout-csv`.
+
+To choose a different number of closest windows, add `--closest N` anywhere in
+the command. The normal scan still uses `--max-mismatches`, and the terminal
+also shows the closest transcript windows without applying that cutoff:
+
+```powershell
+python -m tools_for_pharma.oligo.ncbi_blast --as-sequence "AUGCUACGGAUCUAGCUAGCU" --target-accession NM_000000.0 --closest 10
+```
 
 For oligo risk review, you can scan full AS plus custom subregions:
 
