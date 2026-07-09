@@ -218,6 +218,10 @@ Plot modes:
 By default, plots are saved beside the Excel file in a subfolder based on the
 workbook name. Existing generated examples have been moved to `outputs/plots/`.
 
+Generic grouped-bar plotting now lives in `tools_for_pharma.plotting.bar`, so it
+can be used outside qPCR workflows. The old qPCR command still works as a
+compatibility entrypoint.
+
 For a simple two-column table where the first column is `Group` and the second
 column contains values like `0.72 +/- 0.13` or `0.72 ± 0.13`, make a grouped bar
 plot directly:
@@ -230,6 +234,7 @@ Or run it from PowerShell:
 
 ```powershell
 python -m tools_for_pharma.qpcr.simple_group_plot -i "group_plot.xlsx" --title "MSH3 remaining on D33 relative to baseline in Liver" --y-label "Remaining relative to baseline"
+python -m tools_for_pharma.plotting.bar -i "group_plot.xlsx" --title "MSH3 remaining on D33 relative to baseline in Liver" --y-label "Remaining relative to baseline"
 ```
 
 Labels such as `G1-baseline`, `G1-2mpk D33`, and `G1-5mpk D33` are grouped under
@@ -247,6 +252,93 @@ To create only the all-variable plot:
 
 ```powershell
 python -m tools_for_pharma.qpcr.simple_group_plot -i "group_plot.xlsx" --plot-mode all-variables
+```
+
+## Generic Curve Interpolation Plotting
+
+Use the curve plotter for dose-response or inhibition-rate tables with a
+positive concentration/dose column and an inhibition/response column. By
+default, it fits a smooth 4-parameter logistic curve, the common sigmoidal
+dose-response model used for IC50-style analysis in biopharma, and marks
+`IC50`, `IC75`, and `IC90`. The plot also includes a curve summary with response
+range, log-dose AUC, Hill slope, R-squared, and the local slope at each marked IC
+value.
+
+Input data should usually be a wide table: the first column is concentration,
+and every following column is one compound's inhibition rate.
+
+```csv
+Concentration (nM),AD-001,AD-002
+0.1,5,3
+1,28,18
+10,61,49
+100,92,88
+```
+
+Values can also include an inline error value. The mean is used for the curve,
+and the value after `+/-` or the plus-minus symbol is drawn as an error bar:
+
+```csv
+Concentration (nM),AD-001,AD-002
+0.1,5.00+/-0.50,3.00+/-0.20
+1,28.0+/-1.2,18.0+/-0.9
+10,61.0+/-3.4,49.0+/-2.1
+100,92.0+/-2.8,88.0+/-3.0
+```
+
+If the first row only contains numbers, the tool treats it as data instead of a
+header row. The first column is still concentration, and later columns are named
+`Compound 1`, `Compound 2`, and so on.
+
+```csv
+0.1,5,3
+1,28,18
+10,61,49
+100,92,88
+```
+
+```text
+run_IC50_plot_gui.bat
+run_curve_plot_gui.bat
+```
+
+Or run it from PowerShell:
+
+```powershell
+python -m tools_for_pharma.plotting.IC50 -i "inhibition_curve.xlsx" --sheet "Sheet1"
+```
+
+By default, the title comes from the input file name, output files are saved
+beside the input file, and the marked values are `IC50`, `IC75`, and `IC90`.
+Choose different IC markers with `--ic`:
+
+```powershell
+python -m tools_for_pharma.plotting.IC50 -i "inhibition_curve.csv" --ic "IC50,IC80,IC90"
+```
+
+For many compounds, use one image per compound so the IC summary remains
+readable:
+
+```powershell
+python -m tools_for_pharma.plotting.IC50 -i "inhibition_curve.csv" --plot-mode single
+```
+
+To create both the combined overview and one detailed image per compound:
+
+```powershell
+python -m tools_for_pharma.plotting.IC50 -i "inhibition_curve.csv" --plot-mode both
+```
+
+The IC50-specific summary panel is added by `tools_for_pharma.plotting.IC50`.
+The lower-level `tools_for_pharma.plotting.curve` module stays summary-free for
+general curve plotting. When a combined IC50 plot has more than three curves,
+the detailed summary panel is omitted from that combined image; use
+`--plot-mode single` or `--plot-mode both` for the per-compound summaries.
+
+To use the older point-to-point log-dose interpolation instead of 4PL fitting:
+
+```powershell
+python -m tools_for_pharma.plotting.IC50 -i "inhibition_curve.csv" --fit-method interpolation
 ```
 
 ## qPCR Reference-Gene QC

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from tools_for_pharma.qpcr.simple_group_plot import (
+from tools_for_pharma.plotting.bar import (
     parse_mean_sem,
     prepare_plot_data,
     prepare_wide_time_data,
