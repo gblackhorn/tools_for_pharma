@@ -13,6 +13,7 @@ from tools_for_pharma.oligo.ncbi_blast import (
     parse_scan_region,
     read_antisense_queries,
     scan_antisense_against_transcript,
+    scan_sense_against_transcript,
     transcript_matches_to_csv,
 )
 
@@ -38,6 +39,24 @@ def test_scan_antisense_against_transcript_finds_reverse_complement() -> None:
     assert matches[0].transcript_end == 6
     assert matches[0].mismatches == 0
     assert matches[0].transcript_window_5to3 == "GCAU"
+    assert matches[0].transcript_match_as_5to3 == "AUGC"
+
+
+def test_scan_sense_against_transcript_finds_direct_sequence() -> None:
+    matches = scan_sense_against_transcript(
+        sense_5to3="AUGC",
+        transcript_sequence="GGGAUGCUUU",
+        transcript_name="test_transcript",
+        max_mismatches=0,
+    )
+
+    assert len(matches) == 1
+    assert matches[0].sequence_type == "SS"
+    assert matches[0].target_5to3 == "AUGC"
+    assert matches[0].transcript_start == 4
+    assert matches[0].transcript_end == 7
+    assert matches[0].mismatches == 0
+    assert matches[0].transcript_window_5to3 == "AUGC"
     assert matches[0].transcript_match_as_5to3 == "AUGC"
 
 
@@ -161,6 +180,30 @@ def test_read_antisense_queries_from_table(tmp_path) -> None:
     assert records == [
         AntisenseQuery("AS_A", "AUGC", target_accession="NM_001", species="human", notes="lead"),
         AntisenseQuery("AS_B", "CCGA", target_accession="NM_002", species="mouse", notes="backup"),
+    ]
+
+
+def test_read_antisense_queries_accepts_ss_sequence() -> None:
+    records = read_antisense_queries(ss_sequence="AUGC", ss_name="SS_A")
+
+    assert records == [AntisenseQuery("SS_A", "AUGC", sequence_type="SS")]
+
+
+def test_read_antisense_queries_from_ss_table(tmp_path) -> None:
+    table_path = tmp_path / "ss_list.csv"
+    table_path.write_text(
+        "id,sense,target_accession\n"
+        "SS_A,AUGC,NM_001\n",
+        encoding="utf-8",
+    )
+
+    records = read_antisense_queries(
+        ss_table=table_path,
+        ss_name_column="id",
+    )
+
+    assert records == [
+        AntisenseQuery("SS_A", "AUGC", target_accession="NM_001", sequence_type="SS"),
     ]
 
 

@@ -107,6 +107,14 @@ the input workbook as `<input filename>_ncbi_blast_results.xlsx`.
 python -m tools_for_pharma.oligo.ncbi_blast --as-sequence "AUGCUACGGAUCUAGCUAGCU" --target-accession NM_000000.0
 ```
 
+For an SS/sense sequence that is already in transcript orientation, use
+`--ss-sequence`. The local transcript scan compares SS directly against the
+transcript instead of reverse-complementing it:
+
+```powershell
+python -m tools_for_pharma.oligo.ncbi_blast --ss-sequence "UAGCUAGCUAGAUCCGUAGCA" --target-accession NM_000000.0
+```
+
 For a single AS sequence and target accession, omitting `--output` prints a
 readable quick-look summary directly in the terminal. Add `--output` when you
 want to save the same local scan results as CSV. If no local matches are found
@@ -158,8 +166,11 @@ python -m tools_for_pharma.oligo.ncbi_blast --as-file as_sequences.fasta --blast
 python -m tools_for_pharma.oligo.ncbi_blast --as-table as_sequences.xlsx --as-column antisense --as-name-column oligo_id --blast-only --database refseq_rna --blast-output blast_hits.csv
 ```
 
-Short AS queries are submitted as multi-FASTA batches instead of one BLAST job
-per AS sequence. The default batch cap is 1,000 total AS bases per BLAST request.
+The same BLAST-only workflow accepts SS/sense inputs with `--ss-file`,
+`--ss-table`, `--ss-column`, and `--ss-name-column`.
+
+Short oligo queries are submitted as multi-FASTA batches instead of one BLAST job
+per sequence. The default batch cap is 1,000 total bases per BLAST request.
 The output CSV includes the BLAST RID and the query ID for each hit.
 
 For batch work, the preferred output is an Excel result workbook:

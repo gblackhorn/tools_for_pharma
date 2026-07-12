@@ -1,13 +1,14 @@
-"""NCBI transcript fetch and BLAST helpers for antisense oligos.
+"""NCBI transcript fetch and BLAST helpers for AS/SS oligos.
 
 This module has two related workflows:
 
 1. Specific transcript check:
    Fetch an NM/XM/NR/XR accession with NCBI EFetch, then scan the transcript for
-   the reverse-complement target of an antisense sequence.
+   the reverse-complement target of an antisense sequence or the direct target
+   of a sense sequence.
 
 2. BLAST database search:
-   Submit the antisense sequence to the NCBI BLAST URL API and retrieve a CSV
+   Submit the oligo sequence to the NCBI BLAST URL API and retrieve a CSV
    report. This is best for broad searches such as refseq_rna or core_nt.
 """
 
@@ -64,7 +65,7 @@ CSV_COLUMNS = [
 
 @dataclass(frozen=True)
 class AntisenseQuery:
-    """One named antisense input sequence."""
+    """One named AS or SS input sequence."""
 
     name: str
     sequence_5to3: str
@@ -72,6 +73,7 @@ class AntisenseQuery:
     target_gene: str = ""
     species: str = ""
     notes: str = ""
+    sequence_type: str = "AS"
 
 
 @dataclass(frozen=True)
@@ -85,7 +87,7 @@ class AntisenseRegion:
 
 @dataclass(frozen=True)
 class TranscriptMatch:
-    """One local antisense-vs-transcript match."""
+    """One local AS/SS-vs-transcript match."""
 
     transcript_name: str
     antisense_name: str
@@ -102,6 +104,7 @@ class TranscriptMatch:
     transcript_match_as_5to3: str
     mismatch_positions_1based: tuple[int, ...]
     as_mismatch_positions_1based: tuple[int, ...]
+    sequence_type: str = "AS"
 
 
 @dataclass(frozen=True)
@@ -138,7 +141,21 @@ def fasta_record(name: str, sequence: str, line_width: int = 80) -> str:
 def sanitize_fasta_name(name: str) -> str:
     """Return a FASTA-safe query identifier."""
     cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", clean_text_for_id(name)).strip("_")
-    return cleaned or "antisense_query"
+    return cleaned or "oligo_query"
+
+
+def normalize_sequence_type(value: str) -> str:
+    cleaned = clean_text_for_id(value).upper()
+    if cleaned not in {"AS", "SS"}:
+        raise ValueError("Sequence type must be AS or SS.")
+    return cleaned
+
+
+def default_query_name(sequence_type: str, index: int | None = None) -> str:
+    prefix = normalize_sequence_type(sequence_type)
+    if index is None:
+        return "antisense_query" if prefix == "AS" else "sense_query"
+    return f"{prefix}_{index}"
 
 
 def clean_text_for_id(value: object) -> str:
@@ -146,7 +163,7 @@ def clean_text_for_id(value: object) -> str:
 
 
 def multi_fasta(records: Iterable[AntisenseQuery]) -> str:
-    """Return a multi-FASTA string for one or more AS queries."""
+    """Return a multi-FASTA string for one or more oligo queries."""
     return "\n".join(fasta_record(record.name, record.sequence_5to3) for record in records)
 
 
@@ -216,7 +233,7 @@ class NcbiBlastClient(NcbiHttpClient):
         if query_fasta is None:
             if query_sequence is None:
                 raise ValueError("Provide query_sequence or query_fasta for BLAST submission.")
-            query_fasta = fasta_record("antisense_query", query_sequence)
+            query_fasta = fasta_record("oligo_query", query_sequence)
         params = {
             "CMD": "Put",
             "PROGRAM": DEFAULT_PROGRAM,
@@ -316,9 +333,10 @@ def parse_blast_field(text: str, field_name: str) -> str | None:
     return match.group(1) if match else None
 
 
-def parse_fasta_records(text: str) -> list[AntisenseQuery]:
-    """Parse FASTA text into AS query records."""
+def parse_fasta_records(text: str, sequence_type: str = "AS") -> list[AntisenseQuery]:
+    """Parse FASTA text into AS or SS query records."""
     records = []
+    normalized_type = normalize_sequence_type(sequence_type)
     name: str | None = None
     sequence_lines: list[str] = []
     for raw_line in text.splitlines():
@@ -327,19 +345,31 @@ def parse_fasta_records(text: str) -> list[AntisenseQuery]:
             continue
         if line.startswith(">"):
             if name is not None:
-                records.append(AntisenseQuery(name, normalize_rna("".join(sequence_lines))))
-            name = line[1:].strip() or f"AS_{len(records) + 1}"
+                records.append(
+                    AntisenseQuery(
+                        name,
+                        normalize_rna("".join(sequence_lines)),
+                        sequence_type=normalized_type,
+                    )
+                )
+            name = line[1:].strip() or default_query_name(normalized_type, len(records) + 1)
             sequence_lines = []
         else:
             sequence_lines.append(line)
 
     if name is not None:
-        records.append(AntisenseQuery(name, normalize_rna("".join(sequence_lines))))
+        records.append(
+            AntisenseQuery(
+                name,
+                normalize_rna("".join(sequence_lines)),
+                sequence_type=normalized_type,
+            )
+        )
     return records
 
 
-def parse_plain_antisense_lines(text: str) -> list[AntisenseQuery]:
-    """Parse a plain text list of AS sequences.
+def parse_plain_antisense_lines(text: str, sequence_type: str = "AS") -> list[AntisenseQuery]:
+    """Parse a plain text list of AS or SS sequences.
 
     Accepted line styles:
       AUGCUA...
@@ -348,6 +378,7 @@ def parse_plain_antisense_lines(text: str) -> list[AntisenseQuery]:
       AS_001 AUGCUA...
     """
     records = []
+    normalized_type = normalize_sequence_type(sequence_type)
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -362,21 +393,21 @@ def parse_plain_antisense_lines(text: str) -> list[AntisenseQuery]:
         if len(parts) == 2:
             name, sequence = parts
         else:
-            name = f"AS_{len(records) + 1}"
+            name = default_query_name(normalized_type, len(records) + 1)
             sequence = parts[0]
-        records.append(AntisenseQuery(name, normalize_rna(sequence)))
+        records.append(AntisenseQuery(name, normalize_rna(sequence), sequence_type=normalized_type))
     return records
 
 
-def read_antisense_file(path: Path) -> list[AntisenseQuery]:
-    """Read AS queries from FASTA or plain text."""
+def read_antisense_file(path: Path, sequence_type: str = "AS") -> list[AntisenseQuery]:
+    """Read AS or SS queries from FASTA or plain text."""
     text = path.read_text(encoding="utf-8-sig")
     if any(line.lstrip().startswith(">") for line in text.splitlines()):
-        records = parse_fasta_records(text)
+        records = parse_fasta_records(text, sequence_type=sequence_type)
     else:
-        records = parse_plain_antisense_lines(text)
+        records = parse_plain_antisense_lines(text, sequence_type=sequence_type)
     if not records:
-        raise ValueError(f"No AS sequences found in {path}.")
+        raise ValueError(f"No {normalize_sequence_type(sequence_type)} sequences found in {path}.")
     return records
 
 
@@ -386,9 +417,11 @@ def read_antisense_table(
     name_column: str | None = None,
     target_accession_column: str | None = None,
     sheet_name: str | int | None = None,
+    sequence_type: str = "AS",
 ) -> list[AntisenseQuery]:
-    """Read AS queries from an Excel or CSV table."""
+    """Read AS or SS queries from an Excel or CSV table."""
     import pandas as pd
+    normalized_type = normalize_sequence_type(sequence_type)
 
     suffix = path.suffix.lower()
     if suffix in {".xlsx", ".xlsm", ".xls"}:
@@ -396,29 +429,33 @@ def read_antisense_table(
     elif suffix in {".csv", ".txt"}:
         table = pd.read_csv(path)
     else:
-        raise ValueError("AS table must be an Excel workbook or CSV/text file.")
+        raise ValueError(f"{normalized_type} table must be an Excel workbook or CSV/text file.")
 
     if table.empty:
-        raise ValueError(f"AS table is empty: {path}")
+        raise ValueError(f"{normalized_type} table is empty: {path}")
 
     columns_by_lower = {clean_text_for_id(column).lower(): str(column) for column in table.columns}
     if sequence_column is None:
-        for candidate in ["antisense", "as", "as_sequence", "as sequence", "sequence"]:
+        if normalized_type == "SS":
+            candidates = ["sense", "ss", "ss_sequence", "ss sequence", "sequence"]
+        else:
+            candidates = ["antisense", "as", "as_sequence", "as sequence", "sequence"]
+        for candidate in candidates:
             if candidate in columns_by_lower:
                 sequence_column = columns_by_lower[candidate]
                 break
         if sequence_column is None:
             sequence_column = str(table.columns[0])
     if sequence_column not in table.columns:
-        raise ValueError(f"AS table is missing sequence column: {sequence_column}")
+        raise ValueError(f"{normalized_type} table is missing sequence column: {sequence_column}")
 
     if name_column is None:
-        for candidate in ["name", "id", "oligo", "oligo id", "oligo_id", "as name"]:
+        for candidate in ["name", "id", "oligo", "oligo id", "oligo_id", "as name", "ss name"]:
             if candidate in columns_by_lower:
                 name_column = columns_by_lower[candidate]
                 break
     elif name_column not in table.columns:
-        raise ValueError(f"AS table is missing name column: {name_column}")
+        raise ValueError(f"{normalized_type} table is missing name column: {name_column}")
 
     if target_accession_column is None:
         for candidate in ["target_accession", "target accession", "refseq", "refseq accession"]:
@@ -426,7 +463,7 @@ def read_antisense_table(
                 target_accession_column = columns_by_lower[candidate]
                 break
     elif target_accession_column not in table.columns:
-        raise ValueError(f"AS table is missing target accession column: {target_accession_column}")
+        raise ValueError(f"{normalized_type} table is missing target accession column: {target_accession_column}")
 
     metadata_columns = {
         "target_gene": next(
@@ -465,17 +502,18 @@ def read_antisense_table(
 
         records.append(
             AntisenseQuery(
-                name=name or f"AS_{row_index + 1}",
+                name=name or default_query_name(normalized_type, row_index + 1),
                 sequence_5to3=sequence,
                 target_accession=target_accession,
                 target_gene=metadata["target_gene"],
                 species=metadata["species"],
                 notes=metadata["notes"],
+                sequence_type=normalized_type,
             )
         )
 
     if not records:
-        raise ValueError(f"No AS sequences found in table: {path}")
+        raise ValueError(f"No {normalized_type} sequences found in table: {path}")
     return records
 
 
@@ -486,25 +524,68 @@ def read_antisense_queries(
     as_table: Path | None = None,
     as_column: str | None = None,
     as_name_column: str | None = None,
+    ss_sequence: str | None = None,
+    ss_name: str | None = None,
+    ss_file: Path | None = None,
+    ss_table: Path | None = None,
+    ss_column: str | None = None,
+    ss_name_column: str | None = None,
     target_accession_column: str | None = None,
     as_sheet: str | int | None = None,
+    ss_sheet: str | int | None = None,
 ) -> list[AntisenseQuery]:
-    """Read AS queries from exactly one input source."""
-    provided = [as_sequence is not None, as_file is not None, as_table is not None]
+    """Read AS or SS queries from exactly one input source."""
+    provided = [
+        as_sequence is not None,
+        as_file is not None,
+        as_table is not None,
+        ss_sequence is not None,
+        ss_file is not None,
+        ss_table is not None,
+    ]
     if sum(provided) != 1:
-        raise ValueError("Provide exactly one of --as-sequence, --as-file, or --as-table.")
+        raise ValueError(
+            "Provide exactly one of --as-sequence, --as-file, --as-table, "
+            "--ss-sequence, --ss-file, or --ss-table."
+        )
 
     if as_sequence is not None:
-        return [AntisenseQuery(as_name or "antisense_query", normalize_rna(as_sequence))]
+        return [
+            AntisenseQuery(
+                as_name or default_query_name("AS"),
+                normalize_rna(as_sequence),
+                sequence_type="AS",
+            )
+        ]
     if as_file is not None:
-        return read_antisense_file(as_file)
-    assert as_table is not None
+        return read_antisense_file(as_file, sequence_type="AS")
+    if as_table is not None:
+        return read_antisense_table(
+            as_table,
+            as_column,
+            as_name_column,
+            target_accession_column,
+            as_sheet,
+            sequence_type="AS",
+        )
+    if ss_sequence is not None:
+        return [
+            AntisenseQuery(
+                ss_name or default_query_name("SS"),
+                normalize_rna(ss_sequence),
+                sequence_type="SS",
+            )
+        ]
+    if ss_file is not None:
+        return read_antisense_file(ss_file, sequence_type="SS")
+    assert ss_table is not None
     return read_antisense_table(
-        as_table,
-        as_column,
-        as_name_column,
+        ss_table,
+        ss_column,
+        ss_name_column,
         target_accession_column,
-        as_sheet,
+        ss_sheet,
+        sequence_type="SS",
     )
 
 
@@ -530,6 +611,7 @@ def input_query_rows(records: list[AntisenseQuery]) -> list[dict[str, object]]:
         rows.append(
             {
                 "input_order": index,
+                "sequence_type": normalize_sequence_type(record.sequence_type),
                 "antisense_name": record.name,
                 "blast_query_id": sanitize_fasta_name(record.name),
                 "antisense_5to3": sequence,
@@ -549,7 +631,7 @@ def batch_antisense_queries(
     records: list[AntisenseQuery],
     max_batch_bases: int = DEFAULT_BATCH_BASES,
 ) -> list[list[AntisenseQuery]]:
-    """Group short AS queries into multi-FASTA BLAST batches."""
+    """Group short oligo queries into multi-FASTA BLAST batches."""
     if max_batch_bases < 1:
         raise ValueError("--max-batch-bases must be 1 or greater.")
 
@@ -695,17 +777,24 @@ def scan_antisense_against_transcript(
     antisense_name: str = "antisense_query",
     scan_region: AntisenseRegion | None = None,
     max_mismatches: int | None = DEFAULT_MAX_MISMATCHES,
+    sequence_type: str = "AS",
 ) -> list[TranscriptMatch]:
-    """Find reverse-complement antisense target windows in a transcript.
+    """Find AS or SS target windows in a transcript.
 
-    The transcript window is reported in transcript 5'->3' orientation. The AS
-    oligo is first reverse-complemented to the expected transcript target.
+    The transcript window is reported in transcript 5'->3' orientation. AS
+    oligos are reverse-complemented to the expected transcript target. SS
+    oligos are compared directly to the transcript.
     """
+    normalized_type = normalize_sequence_type(sequence_type)
     antisense = normalize_rna(antisense_5to3)
     transcript = normalize_rna(transcript_sequence)
     region = scan_region or AntisenseRegion("full")
     region_sequence, region_start, region_end = antisense_region_sequence(antisense, region)
-    target = get_complementary_sequence(region_sequence, reverse=True)
+    target = (
+        get_complementary_sequence(region_sequence, reverse=True)
+        if normalized_type == "AS"
+        else region_sequence
+    )
     if len(transcript) < len(target):
         return []
 
@@ -714,7 +803,11 @@ def scan_antisense_against_transcript(
         window = transcript[start_index : start_index + len(target)]
         mismatches = mismatch_positions(target, window)
         if max_mismatches is None or len(mismatches) <= max_mismatches:
-            transcript_match_as = get_complementary_sequence(window, reverse=True)
+            transcript_match_as = (
+                get_complementary_sequence(window, reverse=True)
+                if normalized_type == "AS"
+                else window
+            )
             matches.append(
                 TranscriptMatch(
                     transcript_name=transcript_name,
@@ -732,9 +825,30 @@ def scan_antisense_against_transcript(
                     transcript_match_as_5to3=transcript_match_as,
                     mismatch_positions_1based=mismatches,
                     as_mismatch_positions_1based=mismatch_positions(region_sequence, transcript_match_as),
+                    sequence_type=normalized_type,
                 )
             )
     return sorted(matches, key=lambda item: (item.mismatches, item.transcript_start))
+
+
+def scan_sense_against_transcript(
+    sense_5to3: str,
+    transcript_sequence: str,
+    transcript_name: str = "target_transcript",
+    sense_name: str = "ss_query",
+    scan_region: AntisenseRegion | None = None,
+    max_mismatches: int | None = DEFAULT_MAX_MISMATCHES,
+) -> list[TranscriptMatch]:
+    """Find direct sense target windows in a transcript."""
+    return scan_antisense_against_transcript(
+        antisense_5to3=sense_5to3,
+        transcript_sequence=transcript_sequence,
+        transcript_name=transcript_name,
+        antisense_name=sense_name,
+        scan_region=scan_region,
+        max_mismatches=max_mismatches,
+        sequence_type="SS",
+    )
 
 
 def transcript_matches_to_csv(matches: Iterable[TranscriptMatch]) -> str:
@@ -758,6 +872,7 @@ def transcript_matches_to_csv(matches: Iterable[TranscriptMatch]) -> str:
             "transcript_match_as_5to3",
             "mismatch_positions_1based",
             "as_mismatch_positions_1based",
+            "sequence_type",
         ]
     )
     for match in matches:
@@ -778,6 +893,7 @@ def transcript_matches_to_csv(matches: Iterable[TranscriptMatch]) -> str:
                 match.transcript_match_as_5to3,
                 ";".join(str(position) for position in match.mismatch_positions_1based),
                 ";".join(str(position) for position in match.as_mismatch_positions_1based),
+                match.sequence_type,
             ]
         )
     return output.getvalue()
@@ -804,16 +920,21 @@ def terminal_table(headers: list[str], rows: list[list[object]]) -> str:
 
 
 def transcript_match_terminal_table(matches: Iterable[TranscriptMatch]) -> str:
+    match_list = list(matches)
+    sequence_types = {match.sequence_type for match in match_list}
+    ss_only = sequence_types == {"SS"}
+    matched_header = "matched_ss_5to3" if ss_only else "matched_as_5to3"
+    query_mm_header = "ss_mm_pos" if ss_only else "as_mm_pos"
     headers = [
-        "AS",
+        "query",
         "region",
         "start",
         "end",
         "mm",
         "target_5to3",
-        "matched_as_5to3",
+        matched_header,
         "mm_pos",
-        "as_mm_pos",
+        query_mm_header,
     ]
     rows = [
         [
@@ -827,7 +948,7 @@ def transcript_match_terminal_table(matches: Iterable[TranscriptMatch]) -> str:
             ";".join(str(position) for position in match.mismatch_positions_1based) or "-",
             ";".join(str(position) for position in match.as_mismatch_positions_1based) or "-",
         ]
-        for match in matches
+        for match in match_list
     ]
     return terminal_table(headers, rows)
 
@@ -855,13 +976,16 @@ def format_transcript_matches_for_terminal(
     """Format local transcript matches as a readable terminal summary."""
     match_list = list(matches)
     transcript_names = sorted({match.transcript_name for match in match_list})
+    sequence_types = {normalize_sequence_type(query.sequence_type) for query in queries}
+    label = next(iter(sequence_types)) if len(sequence_types) == 1 else "Oligo"
     output = io.StringIO()
     output.write("Local transcript scan\n")
-    output.write(f"AS queries: {len(queries)}\n")
+    output.write(f"{label} queries: {len(queries)}\n")
     if len(queries) == 1:
         query = queries[0]
-        output.write(f"AS name: {query.name}\n")
-        output.write(f"AS sequence: {normalize_rna(query.sequence_5to3)}\n")
+        query_label = normalize_sequence_type(query.sequence_type)
+        output.write(f"{query_label} name: {query.name}\n")
+        output.write(f"{query_label} sequence: {normalize_rna(query.sequence_5to3)}\n")
     if transcript_names:
         if len(transcript_names) == 1:
             output.write(f"Transcript: {transcript_names[0]}\n")
@@ -918,6 +1042,7 @@ def transcript_match_rows(matches: Iterable[TranscriptMatch]) -> list[dict[str, 
         rows.append(
             {
                 "transcript_name": match.transcript_name,
+                "sequence_type": match.sequence_type,
                 "antisense_name": match.antisense_name,
                 "scan_region": match.scan_region,
                 "as_region_start": match.as_region_start,
@@ -1035,6 +1160,7 @@ def metadata_rows(
         "poll_seconds": max(args.poll_seconds, DEFAULT_POLL_SECONDS),
         "max_batch_bases": args.max_batch_bases,
         "query_count": len(queries),
+        "sequence_types": ";".join(sorted({normalize_sequence_type(query.sequence_type) for query in queries})),
         "total_query_bases": sum(len(normalize_rna(query.sequence_5to3)) for query in queries),
         "scan_regions": ";".join(region.name for region in scan_regions),
         "max_mismatches_local_scan": args.max_mismatches,
@@ -1057,7 +1183,7 @@ def write_excel_workbook(path: Path, sheets: dict[str, list[dict[str, object]]])
 def default_result_workbook(args: argparse.Namespace) -> Path | None:
     if args.result_workbook:
         return args.result_workbook
-    source = args.as_table or args.as_file
+    source = args.as_table or args.as_file or getattr(args, "ss_table", None) or getattr(args, "ss_file", None)
     if source and not args.output and not args.blast_output:
         return source.with_name(f"{source.stem}_ncbi_blast_results.xlsx")
     return None
@@ -1353,6 +1479,13 @@ def gui_args(input_file: Path, sheet_name: str | None, settings: dict[str, objec
         as_column=settings["as_column"],
         as_name_column=settings["as_name_column"],
         as_sheet=sheet_name,
+        ss_sequence=None,
+        ss_name=None,
+        ss_file=None,
+        ss_table=None,
+        ss_column=None,
+        ss_name_column=None,
+        ss_sheet=None,
         target_accession=settings["target_accession"],
         target_accession_column=settings["target_accession_column"],
         target_file=settings["target_file"],
@@ -1451,7 +1584,7 @@ def write_text(path: Path, text: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Compare AS oligos to transcripts and optionally run NCBI BLAST."
+        description="Compare AS or SS oligos to transcripts and optionally run NCBI BLAST."
     )
     parser.add_argument("--as-sequence", help="One AS oligo sequence in 5'->3'.")
     parser.add_argument("--as-name", help="Name for the single --as-sequence input.")
@@ -1466,11 +1599,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional AS name/id column for --as-table.",
     )
     parser.add_argument("--as-sheet", help="Excel worksheet for --as-table. Defaults to first sheet.")
+    parser.add_argument("--ss-sequence", help="One SS/sense oligo sequence in 5'->3' transcript orientation.")
+    parser.add_argument("--ss-name", help="Name for the single --ss-sequence input.")
+    parser.add_argument("--ss-file", type=Path, help="Text or FASTA file containing SS/sense sequences.")
+    parser.add_argument("--ss-table", type=Path, help="Excel/CSV table containing SS/sense sequences.")
+    parser.add_argument(
+        "--ss-column",
+        help="SS/sense sequence column for --ss-table. Defaults to sense/ss/sequence or first column.",
+    )
+    parser.add_argument(
+        "--ss-name-column",
+        help="Optional SS/sense name/id column for --ss-table.",
+    )
+    parser.add_argument("--ss-sheet", help="Excel worksheet for --ss-table. Defaults to first sheet.")
     parser.add_argument("--target-accession", help="NM/XM/NR/XR accession to fetch from NCBI.")
     parser.add_argument(
         "--target-accession-column",
         help=(
-            "Column in --as-table containing per-row NM/XM/NR/XR accessions. "
+            "Column in --as-table or --ss-table containing per-row NM/XM/NR/XR accessions. "
             "Defaults to target_accession if present."
         ),
     )
@@ -1480,7 +1626,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--scan-region",
         action="append",
         help=(
-            "AS region to scan locally: full, 2-18, or seed:2-8. "
+            "Oligo region to scan locally: full, 2-18, or seed:2-8. "
             "Can be repeated. Defaults to full."
         ),
     )
@@ -1530,7 +1676,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_BATCH_BASES,
         help=(
-            "Maximum total AS bases per BLAST multi-FASTA submission. "
+            "Maximum total oligo bases per BLAST multi-FASTA submission. "
             f"Defaults to {DEFAULT_BATCH_BASES}."
         ),
     )
@@ -1593,7 +1739,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Print a readable local transcript scan summary to the terminal. "
-            "For one --as-sequence scan without --output, this is the default."
+            "For one --as-sequence or --ss-sequence scan without --output, this is the default."
         ),
     )
     parser.add_argument(
@@ -1616,7 +1762,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "Write an Excel workbook with input_queries, local scan, BLAST hits, "
-            "batch metadata, and run metadata. For --as-file/--as-table, defaults "
+            "batch metadata, and run metadata. For --as-file/--as-table or "
+            "--ss-file/--ss-table, defaults "
             "to '<input>_ncbi_blast_results.xlsx' when no CSV output is requested."
         ),
     )
@@ -1636,8 +1783,15 @@ def args_antisense_queries(args: argparse.Namespace) -> list[AntisenseQuery]:
         as_table=args.as_table,
         as_column=args.as_column,
         as_name_column=args.as_name_column,
+        ss_sequence=args.ss_sequence,
+        ss_name=args.ss_name,
+        ss_file=args.ss_file,
+        ss_table=args.ss_table,
+        ss_column=args.ss_column,
+        ss_name_column=args.ss_name_column,
         target_accession_column=args.target_accession_column,
         as_sheet=args.as_sheet,
+        ss_sheet=args.ss_sheet,
     )
 
 
@@ -1684,6 +1838,7 @@ def run_local_scan(
                     antisense_name=query.name,
                     scan_region=scan_region,
                     max_mismatches=max_mismatches,
+                    sequence_type=query.sequence_type,
                 )
             )
     return matches
@@ -1743,7 +1898,7 @@ def run_blast_batches(
     for batch_index, batch in enumerate(batches, start=1):
         print(
             f"Submitting BLAST batch {batch_index}/{len(batches)} "
-            f"({len(batch)} AS sequences)...",
+            f"({len(batch)} oligo sequences)...",
             file=sys.stderr,
         )
         submission = client.submit_blastn(
@@ -1807,7 +1962,7 @@ def main() -> int:
                 raise ValueError("--closest must be 1 or greater.")
             result_workbook = default_result_workbook(args)
             quick_terminal_default = (
-                args.as_sequence
+                (args.as_sequence or args.ss_sequence)
                 and len(queries) == 1
                 and not args.output
                 and not result_workbook
