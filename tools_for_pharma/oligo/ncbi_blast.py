@@ -15,7 +15,7 @@ This module has two related workflows:
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import csv
 from datetime import datetime, timezone
 import io
@@ -74,6 +74,7 @@ class AntisenseQuery:
     species: str = ""
     notes: str = ""
     sequence_type: str = "AS"
+    source_fields: dict[str, object] = field(default_factory=dict, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -500,6 +501,11 @@ def read_antisense_table(
                     value = clean_text_for_id(raw_value)
             metadata[key] = value
 
+        source_fields = {
+            str(column): (None if pd.isna(row[column]) else row[column])
+            for column in table.columns
+        }
+
         records.append(
             AntisenseQuery(
                 name=name or default_query_name(normalized_type, row_index + 1),
@@ -509,6 +515,7 @@ def read_antisense_table(
                 species=metadata["species"],
                 notes=metadata["notes"],
                 sequence_type=normalized_type,
+                source_fields=source_fields,
             )
         )
 
@@ -608,22 +615,24 @@ def input_query_rows(records: list[AntisenseQuery]) -> list[dict[str, object]]:
     for index, record in enumerate(records, start=1):
         sequence = normalize_rna(record.sequence_5to3)
         duplicate_names = duplicate_groups.get(sequence, [])
-        rows.append(
-            {
-                "input_order": index,
-                "sequence_type": normalize_sequence_type(record.sequence_type),
-                "antisense_name": record.name,
-                "blast_query_id": sanitize_fasta_name(record.name),
-                "antisense_5to3": sequence,
-                "length_nt": len(sequence),
-                "target_accession": record.target_accession,
-                "target_gene": record.target_gene,
-                "species": record.species,
-                "notes": record.notes,
-                "is_duplicate_sequence": bool(duplicate_names),
-                "duplicate_group_names": ";".join(duplicate_names),
-            }
-        )
+        output_row = {
+            "input_order": index,
+            "sequence_type": normalize_sequence_type(record.sequence_type),
+            "antisense_name": record.name,
+            "blast_query_id": sanitize_fasta_name(record.name),
+            "antisense_5to3": sequence,
+            "length_nt": len(sequence),
+            "target_accession": record.target_accession,
+            "target_gene": record.target_gene,
+            "species": record.species,
+            "notes": record.notes,
+            "is_duplicate_sequence": bool(duplicate_names),
+            "duplicate_group_names": ";".join(duplicate_names),
+        }
+        for column, value in record.source_fields.items():
+            if column not in output_row:
+                output_row[column] = value
+        rows.append(output_row)
     return rows
 
 
@@ -1036,25 +1045,38 @@ def parse_blast_csv(text: str) -> list[dict[str, str]]:
     return rows
 
 
-def transcript_match_rows(matches: Iterable[TranscriptMatch]) -> list[dict[str, object]]:
+def transcript_match_rows(
+    matches: Iterable[TranscriptMatch],
+    *,
+    include_as_oriented_match: bool = True,
+) -> list[dict[str, object]]:
+    """Return local-match rows, optionally including the AS-oriented match.
+
+    The default preserves the existing row schema for callers outside the Excel
+    workbook.  Result workbooks omit the redundant AS-oriented sequence while
+    CSV and terminal output continue to expose it.
+    """
     rows = []
     for match in matches:
-        rows.append(
+        row = {
+            "transcript_name": match.transcript_name,
+            "sequence_type": match.sequence_type,
+            "antisense_name": match.antisense_name,
+            "scan_region": match.scan_region,
+            "as_region_start": match.as_region_start,
+            "as_region_end": match.as_region_end,
+            "antisense_5to3": match.antisense_5to3,
+            "antisense_region_5to3": match.antisense_region_5to3,
+            "expected_target_5to3": match.target_5to3,
+            "transcript_start": match.transcript_start,
+            "transcript_end": match.transcript_end,
+            "mismatches": match.mismatches,
+            "transcript_window_5to3": match.transcript_window_5to3,
+        }
+        if include_as_oriented_match:
+            row["transcript_match_as_5to3"] = match.transcript_match_as_5to3
+        row.update(
             {
-                "transcript_name": match.transcript_name,
-                "sequence_type": match.sequence_type,
-                "antisense_name": match.antisense_name,
-                "scan_region": match.scan_region,
-                "as_region_start": match.as_region_start,
-                "as_region_end": match.as_region_end,
-                "antisense_5to3": match.antisense_5to3,
-                "antisense_region_5to3": match.antisense_region_5to3,
-                "expected_target_5to3": match.target_5to3,
-                "transcript_start": match.transcript_start,
-                "transcript_end": match.transcript_end,
-                "mismatches": match.mismatches,
-                "transcript_window_5to3": match.transcript_window_5to3,
-                "transcript_match_as_5to3": match.transcript_match_as_5to3,
                 "mismatch_positions_1based": ";".join(
                     str(position) for position in match.mismatch_positions_1based
                 ),
@@ -1063,6 +1085,7 @@ def transcript_match_rows(matches: Iterable[TranscriptMatch]) -> list[dict[str, 
                 ),
             }
         )
+        rows.append(row)
     return rows
 
 
@@ -1202,21 +1225,37 @@ def write_result_workbook(
     blast_results: list[BlastBatchResult],
     started_at: str,
     completed_at: str,
+    *,
+    include_blast_sheets: bool = True,
 ) -> None:
     raw_blast_rows = blast_raw_rows(blast_results, queries)
     sheets = {
         "input_queries": input_query_rows(queries),
-        "local_transcript_scan": transcript_match_rows(local_matches),
-        "blast_hits_raw": raw_blast_rows,
-        "blast_hits_filtered": filter_blast_rows(
-            raw_blast_rows,
-            args.filter_max_mismatches,
-            args.filter_max_gap_opens,
-            args.filter_min_alignment_fraction,
+        "local_transcript_scan": transcript_match_rows(
+            local_matches,
+            include_as_oriented_match=False,
         ),
-        "blast_batches": blast_batch_rows(blast_results),
-        "run_metadata": metadata_rows(args, queries, scan_regions, started_at, completed_at),
     }
+    if include_blast_sheets:
+        sheets.update(
+            {
+                "blast_hits_raw": raw_blast_rows,
+                "blast_hits_filtered": filter_blast_rows(
+                    raw_blast_rows,
+                    args.filter_max_mismatches,
+                    args.filter_max_gap_opens,
+                    args.filter_min_alignment_fraction,
+                ),
+                "blast_batches": blast_batch_rows(blast_results),
+            }
+        )
+    sheets["run_metadata"] = metadata_rows(
+        args,
+        queries,
+        scan_regions,
+        started_at,
+        completed_at,
+    )
     write_excel_workbook(path, sheets)
 
 
@@ -1564,6 +1603,7 @@ def run_gui() -> int:
             [],
             started_at,
             completed_at,
+            include_blast_sheets=False,
         )
         messagebox.showinfo(
             "Done",

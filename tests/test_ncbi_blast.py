@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import pandas as pd
+
 from tools_for_pharma.oligo.ncbi_blast import (
     AntisenseRegion,
     AntisenseQuery,
     batch_antisense_queries,
+    build_parser,
     closest_transcript_matches,
     format_closest_transcript_matches_for_terminal,
     format_transcript_matches_for_terminal,
@@ -14,7 +17,9 @@ from tools_for_pharma.oligo.ncbi_blast import (
     read_antisense_queries,
     scan_antisense_against_transcript,
     scan_sense_against_transcript,
+    transcript_match_rows,
     transcript_matches_to_csv,
+    write_result_workbook,
 )
 
 
@@ -89,6 +94,71 @@ def test_transcript_matches_to_csv_includes_expected_columns() -> None:
     assert "transcript_name,antisense_name,scan_region,as_region_start" in text
     assert "transcript_window_5to3,transcript_match_as_5to3" in text
     assert "test_transcript,antisense_query,full,1,4,AUGC,AUGC,GCAU,3,6,0,GCAU,AUGC,," in text
+
+
+def test_workbook_rows_can_omit_as_oriented_match_without_changing_default_schema() -> None:
+    matches = scan_antisense_against_transcript(
+        antisense_5to3="AUGC",
+        transcript_sequence="GGGCAUTTT",
+        max_mismatches=0,
+    )
+
+    default_rows = transcript_match_rows(matches)
+    workbook_rows = transcript_match_rows(matches, include_as_oriented_match=False)
+
+    assert default_rows[0]["transcript_match_as_5to3"] == "AUGC"
+    assert "transcript_match_as_5to3" not in workbook_rows[0]
+
+
+def test_gui_workbook_omits_blast_sheets_but_default_workbook_keeps_them(tmp_path) -> None:
+    args = build_parser().parse_args(
+        ["--as-sequence", "AUGC", "--target-sequence", "GCAU"]
+    )
+    queries = [AntisenseQuery("AS_demo", "AUGC")]
+    regions = [AntisenseRegion("full")]
+    matches = scan_antisense_against_transcript(
+        antisense_5to3="AUGC",
+        transcript_sequence="GCAU",
+        max_mismatches=0,
+    )
+    gui_path = tmp_path / "gui.xlsx"
+    full_path = tmp_path / "full.xlsx"
+
+    write_result_workbook(
+        gui_path,
+        args,
+        queries,
+        regions,
+        matches,
+        [],
+        "start",
+        "end",
+        include_blast_sheets=False,
+    )
+    write_result_workbook(
+        full_path,
+        args,
+        queries,
+        regions,
+        matches,
+        [],
+        "start",
+        "end",
+    )
+
+    assert pd.ExcelFile(gui_path).sheet_names == [
+        "input_queries",
+        "local_transcript_scan",
+        "run_metadata",
+    ]
+    assert pd.ExcelFile(full_path).sheet_names == [
+        "input_queries",
+        "local_transcript_scan",
+        "blast_hits_raw",
+        "blast_hits_filtered",
+        "blast_batches",
+        "run_metadata",
+    ]
 
 
 def test_format_transcript_matches_for_terminal_shows_quick_summary() -> None:
@@ -181,6 +251,27 @@ def test_read_antisense_queries_from_table(tmp_path) -> None:
         AntisenseQuery("AS_A", "AUGC", target_accession="NM_001", species="human", notes="lead"),
         AntisenseQuery("AS_B", "CCGA", target_accession="NM_002", species="mouse", notes="backup"),
     ]
+
+
+def test_input_query_rows_include_additional_columns_from_source_excel(tmp_path) -> None:
+    table_path = tmp_path / "as_list.xlsx"
+    pd.DataFrame(
+        {
+            "id": ["AS_A", "AS_B"],
+            "antisense": ["AUGC", "CCGA"],
+            "Pos20": ["A", "G"],
+            "project_code": [101, 102],
+        }
+    ).to_excel(table_path, index=False)
+
+    records = read_antisense_queries(as_table=table_path, as_name_column="id")
+    rows = input_query_rows(records)
+
+    assert rows[0]["Pos20"] == "A"
+    assert rows[1]["Pos20"] == "G"
+    assert rows[0]["project_code"] == 101
+    assert rows[0]["id"] == "AS_A"
+    assert rows[0]["antisense"] == "AUGC"
 
 
 def test_read_antisense_queries_accepts_ss_sequence() -> None:
