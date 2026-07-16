@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import math
+from numbers import Real
 from pathlib import Path
 import re
 import sys
@@ -10,6 +12,7 @@ import sys
 import pandas as pd
 
 from tools_for_pharma.qpcr.common import (
+    INDIVIDUAL_RQ_COLUMN,
     MEAN_RQ_COLUMN,
     PLOTDATA_SHEET_PREFIX,
     REFERENCE_SOURCE_COLUMN,
@@ -35,22 +38,20 @@ REQUIRED_COLUMNS = [
 ]
 
 FONT_FAMILY = "Arial"
-FONT_SIZE = 11
-TITLE_FONT_SIZE = 14
-AXIS_LABEL_FONT_SIZE = 14
-TICK_LABEL_FONT_SIZE = 14
-LEGEND_FONT_SIZE = 14
-SPLIT_FIGURE_HEIGHT = 6.5
-COMBINED_FIGURE_HEIGHT = 7.2
-COMBINED_LAYOUT_TOP = 0.84
+FONT_SIZE = 15
+TITLE_FONT_SIZE = 22
+AXIS_LABEL_FONT_SIZE = 20
+TICK_LABEL_FONT_SIZE = 16
+LEGEND_FONT_SIZE = 16
+SPLIT_FIGURE_HEIGHT = 9.0
+COMBINED_FIGURE_HEIGHT = 9.5
+COMBINED_LAYOUT_TOP = 0.80
 COMBINED_LEGEND_TOP = 0.91
 MAX_LEGEND_COLUMNS = 4
 TEXT_COLOR = "#222222"
 AXIS_COLOR = "#444444"
-GRID_COLOR = "#D9D9D9"
+GRID_COLOR = "#E4E4E4"
 BASELINE_COLOR = "#7A7A7A"
-BAR_EDGE_COLOR = "#303030"
-ERROR_BAR_COLOR = "#2A2A2A"
 REFERENCE_PALETTE = [
     "#4E79A7",
     "#59A14F",
@@ -59,10 +60,28 @@ REFERENCE_PALETTE = [
     "#E15759",
     "#76B7B2",
 ]
+SCATTER_EDGE_COLOR = "#FFFFFF"
+SCATTER_SIZE = 30
+BAR_OUTLINE_WIDTH = 1.45
+ERROR_LINE_WIDTH = 1.05
+AXIS_SPINE_OFFSET_POINTS = 7
+
+BAR_KEY_COLUMNS = ["Group", "Compound ID", REFERENCE_SOURCE_COLUMN]
+
+
+def identifier_label(value: object) -> str:
+    """Format numeric identifiers without changing genuine text identifiers."""
+    if isinstance(value, Real) and not isinstance(value, bool):
+        number = float(value)
+        if math.isfinite(number):
+            if number.is_integer():
+                return str(int(number))
+            return f"{number:g}"
+    return clean_text(value)
 
 
 def group_label(row: pd.Series) -> str:
-    return f"{clean_text(row['Group'])} | {clean_text(row['Compound ID'])}"
+    return f"{identifier_label(row['Group'])} | {identifier_label(row['Compound ID'])}"
 
 
 def sanitize_filename(value: object) -> str:
@@ -76,6 +95,43 @@ def reference_color(reference_source: object, reference_sources: list[object]) -
     except ValueError:
         index = 0
     return REFERENCE_PALETTE[index % len(REFERENCE_PALETTE)]
+
+
+def bar_summary(summary: pd.DataFrame) -> pd.DataFrame:
+    """Return one mean/SEM row per plotted bar while preserving input order."""
+    return summary.drop_duplicates(subset=BAR_KEY_COLUMNS, keep="first").copy()
+
+
+def jitter_positions(center: float, count: int, half_width: float) -> list[float]:
+    if count <= 0:
+        return []
+    if count == 1:
+        return [center]
+    return [
+        center - half_width + (2 * half_width * index / (count - 1))
+        for index in range(count)
+    ]
+
+
+def add_individual_points(
+    axis,
+    center: float,
+    values: list[float],
+    half_width: float,
+    color: str,
+) -> None:
+    if not values:
+        return
+    axis.scatter(
+        jitter_positions(center, len(values), half_width),
+        values,
+        s=SCATTER_SIZE,
+        color=color,
+        edgecolors=SCATTER_EDGE_COLOR,
+        linewidths=0.65,
+        alpha=0.94,
+        zorder=4,
+    )
 
 
 def default_plot_dir(input_file: Path) -> Path:
@@ -157,6 +213,13 @@ def read_summary(input_file: Path, sheet_name: str | None = None) -> pd.DataFram
 
     summary[MEAN_RQ_COLUMN] = pd.to_numeric(summary[MEAN_RQ_COLUMN], errors="coerce")
     summary[SEM_COLUMN] = pd.to_numeric(summary[SEM_COLUMN], errors="coerce")
+    if INDIVIDUAL_RQ_COLUMN in summary.columns:
+        summary[INDIVIDUAL_RQ_COLUMN] = pd.to_numeric(
+            summary[INDIVIDUAL_RQ_COLUMN],
+            errors="coerce",
+        )
+    else:
+        summary[INDIVIDUAL_RQ_COLUMN] = pd.NA
     summary = summary.dropna(subset=[MEAN_RQ_COLUMN, SEM_COLUMN])
     if summary.empty:
         raise ValueError("The selected summary sheet has no plottable MEAN RQ/SEM rows.")
@@ -179,9 +242,22 @@ def finish_plot(axis, title: str, labels: list[str], output_path: Path) -> list[
     else:
         axis.set_title(title, pad=12, color=TEXT_COLOR)
     axis.set_ylabel(MEAN_RQ_COLUMN)
-    axis.axhline(1, color=BASELINE_COLOR, linewidth=1, linestyle="--", zorder=0)
-    axis.yaxis.grid(True, color=GRID_COLOR, linewidth=0.7)
+    axis.axhline(
+        1,
+        color=BASELINE_COLOR,
+        linewidth=0.85,
+        linestyle=(0, (4, 3)),
+        alpha=0.75,
+        zorder=0,
+    )
+    axis.yaxis.grid(True, color=GRID_COLOR, linewidth=0.55)
     axis.set_axisbelow(True)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    axis.spines["left"].set_linewidth(0.8)
+    axis.spines["bottom"].set_linewidth(0.8)
+    axis.spines["left"].set_position(("outward", AXIS_SPINE_OFFSET_POINTS))
+    axis.spines["bottom"].set_position(("outward", AXIS_SPINE_OFFSET_POINTS))
     axis.set_xticks(range(len(labels)))
     axis.set_xticklabels(
         labels,
@@ -191,10 +267,6 @@ def finish_plot(axis, title: str, labels: list[str], output_path: Path) -> list[
     )
     axis.tick_params(axis="both", length=3, width=0.8)
     axis.margins(x=0.01)
-    axis.spines["top"].set_visible(False)
-    axis.spines["right"].set_visible(False)
-    axis.spines["left"].set_linewidth(0.8)
-    axis.spines["bottom"].set_linewidth(0.8)
     axis.set_ylim(bottom=0)
     if axis.figure.legends:
         axis.figure.tight_layout(rect=(0, 0, 1, COMBINED_LAYOUT_TOP))
@@ -210,28 +282,49 @@ def finish_plot(axis, title: str, labels: list[str], output_path: Path) -> list[
 def plot_split_by_reference(summary: pd.DataFrame, plot_dir: Path) -> list[Path]:
     plt = get_pyplot()
     output_paths = []
-    reference_sources = list(dict.fromkeys(summary[REFERENCE_SOURCE_COLUMN].tolist()))
+    bars = bar_summary(summary)
+    reference_sources = list(dict.fromkeys(bars[REFERENCE_SOURCE_COLUMN].tolist()))
 
-    for reference_source, subset in summary.groupby(REFERENCE_SOURCE_COLUMN, sort=False):
+    for reference_source, subset in bars.groupby(REFERENCE_SOURCE_COLUMN, sort=False):
+        series_color = reference_color(reference_source, reference_sources)
         labels = subset["Plot label"].tolist()
         y_values = subset[MEAN_RQ_COLUMN].tolist()
         y_errors = subset[SEM_COLUMN].tolist()
-        figure_width = max(10, len(labels) * 0.38)
+        figure_width = max(13, len(labels) * 0.60)
         _figure, axis = plt.subplots(figsize=(figure_width, SPLIT_FIGURE_HEIGHT))
         axis.bar(
             range(len(labels)),
             y_values,
             yerr=y_errors,
-            capsize=2.5,
-            color=reference_color(reference_source, reference_sources),
-            edgecolor=BAR_EDGE_COLOR,
+            capsize=3.2,
+            color="none",
+            edgecolor=series_color,
             error_kw={
-                "elinewidth": 0.9,
-                "ecolor": ERROR_BAR_COLOR,
-                "capthick": 0.9,
+                "elinewidth": ERROR_LINE_WIDTH,
+                "ecolor": series_color,
+                "capthick": ERROR_LINE_WIDTH,
             },
-            linewidth=0.35,
+            linewidth=BAR_OUTLINE_WIDTH,
+            zorder=2,
         )
+        source_points = summary[summary[REFERENCE_SOURCE_COLUMN] == reference_source]
+        for x_position, plot_label in enumerate(labels):
+            values = (
+                source_points.loc[
+                    source_points["Plot label"] == plot_label,
+                    INDIVIDUAL_RQ_COLUMN,
+                ]
+                .dropna()
+                .astype(float)
+                .tolist()
+            )
+            add_individual_points(
+                axis,
+                x_position,
+                values,
+                half_width=0.16,
+                color=series_color,
+            )
         output_path = plot_dir / f"{sanitize_filename(reference_source)}.png"
         output_paths.extend(
             finish_plot(
@@ -246,18 +339,20 @@ def plot_split_by_reference(summary: pd.DataFrame, plot_dir: Path) -> list[Path]
 
 def plot_combined_references(summary: pd.DataFrame, plot_dir: Path) -> list[Path]:
     plt = get_pyplot()
-    labels = list(dict.fromkeys(summary["Plot label"].tolist()))
-    reference_sources = list(dict.fromkeys(summary[REFERENCE_SOURCE_COLUMN].tolist()))
+    bars = bar_summary(summary)
+    labels = list(dict.fromkeys(bars["Plot label"].tolist()))
+    reference_sources = list(dict.fromkeys(bars[REFERENCE_SOURCE_COLUMN].tolist()))
     if not labels or not reference_sources:
         return []
 
-    figure_width = max(12, len(labels) * 0.56)
+    figure_width = max(15, len(labels) * 0.82)
     figure, axis = plt.subplots(figsize=(figure_width, COMBINED_FIGURE_HEIGHT))
-    bar_width = min(0.18, 0.8 / max(len(reference_sources), 1))
+    bar_width = min(0.26, 0.82 / max(len(reference_sources), 1))
     first_offset = -bar_width * (len(reference_sources) - 1) / 2
 
     for source_index, reference_source in enumerate(reference_sources):
-        subset = summary[summary[REFERENCE_SOURCE_COLUMN] == reference_source]
+        series_color = REFERENCE_PALETTE[source_index % len(REFERENCE_PALETTE)]
+        subset = bars[bars[REFERENCE_SOURCE_COLUMN] == reference_source]
         by_label = {
             label: row
             for label, row in subset.set_index("Plot label").iterrows()
@@ -279,17 +374,36 @@ def plot_combined_references(summary: pd.DataFrame, plot_dir: Path) -> list[Path
             y_values,
             width=bar_width,
             yerr=y_errors,
-            capsize=2,
+            capsize=2.6,
             label=reference_source,
-            color=REFERENCE_PALETTE[source_index % len(REFERENCE_PALETTE)],
-            edgecolor=BAR_EDGE_COLOR,
+            color="none",
+            edgecolor=series_color,
             error_kw={
-                "elinewidth": 0.8,
-                "ecolor": ERROR_BAR_COLOR,
-                "capthick": 0.8,
+                "elinewidth": ERROR_LINE_WIDTH,
+                "ecolor": series_color,
+                "capthick": ERROR_LINE_WIDTH,
             },
-            linewidth=0.35,
+            linewidth=BAR_OUTLINE_WIDTH,
+            zorder=2,
         )
+        source_points = summary[summary[REFERENCE_SOURCE_COLUMN] == reference_source]
+        for x_position, label in zip(x_values, labels):
+            values = (
+                source_points.loc[
+                    source_points["Plot label"] == label,
+                    INDIVIDUAL_RQ_COLUMN,
+                ]
+                .dropna()
+                .astype(float)
+                .tolist()
+            )
+            add_individual_points(
+                axis,
+                x_position,
+                values,
+                half_width=bar_width * 0.34,
+                color=series_color,
+            )
 
     handles, legend_labels = axis.get_legend_handles_labels()
     figure.legend(

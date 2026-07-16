@@ -202,6 +202,18 @@ Use the extraction GUI:
 run_qpcr_extract_gui.bat
 ```
 
+After choosing a workbook and worksheet, the GUI shows a column-mapping review.
+It auto-selects Group, Compound ID, Sample ID, Animal ID, the individual plotted
+value, bar mean, SEM, and optional sample size. Two-row headers are displayed as
+combined labels such as `APOE | Mean CT`, so the final group `Mean` is not
+confused with a gene-level `Mean CT`. Adjust any dropdown before continuing.
+Known schemas remain automatic, including both `MEAN RQ` with `Relative to
+control group` and the shorter `Mean` with `Normalized RQ`. If no sample-size
+column exists, it is inferred from the number of extracted individual values.
+Before writing the `plotdata-...` sheet, a preview reports the number of bars
+and individual values and warns when a provided mean differs materially from
+the mean calculated from its individual values.
+
 Or run extraction from PowerShell:
 
 ```powershell
@@ -225,6 +237,14 @@ Plot modes:
 - `split`: one plot per reference source
 - `combined`: one grouped plot with all reference sources together
 - `both`: create both styles
+
+New extractions keep one row per animal in the `plotdata-...` sheet. Along with
+the reviewed group `MEAN RQ` and `SEM`, the sheet includes `Sample ID`,
+`Animal ID`, and `Individual RQ`. The individual value is taken from `Relative
+to control group` for each reference-gene table and from `Geomean` for the
+aggregate table. The qPCR plotter overlays these values as jittered dots on the
+mean +/- SEM bars. Older extracted sheets without `Individual RQ` remain
+compatible and are plotted as bars without dots.
 
 By default, plots are saved beside the Excel file in a subfolder based on the
 workbook name. Existing generated examples have been moved to `outputs/plots/`.
