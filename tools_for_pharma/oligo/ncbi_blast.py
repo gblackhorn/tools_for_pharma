@@ -15,15 +15,20 @@ This module has two related workflows:
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import csv
 from datetime import datetime, timezone
+import hashlib
 import io
+import json
+import logging
+import math
+import os
 from pathlib import Path
 import re
 import sys
 import time
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -36,17 +41,26 @@ from tools_for_pharma.shared.excel_utils import list_excel_sheets
 BLAST_URL = "https://blast.ncbi.nlm.nih.gov/Blast.cgi"
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 DEFAULT_TOOL = "tools_for_pharma_oligo"
-DEFAULT_EMAIL = "da.guo@argobiopharma.com"
+DEFAULT_EMAIL = ""
 DEFAULT_DATABASE = "refseq_rna"
 DEFAULT_PROGRAM = "blastn"
 DEFAULT_EXPECT = "1000"
 DEFAULT_WORD_SIZE = 7
+DEFAULT_MEGABLAST_WORD_SIZE = 28
 DEFAULT_HITLIST_SIZE = 50
 DEFAULT_MAX_MISMATCHES = 3
 DEFAULT_CLOSEST_MATCHES = 10
+DEFAULT_SINGLE_GUI_CLOSEST_MATCHES = 5
 DEFAULT_BATCH_BASES = 1000
 DEFAULT_POLL_SECONDS = 75
 DEFAULT_REQUEST_SECONDS = 15
+APP_DATA_DIR_NAME = "TranscriptScanData"
+GUI_SETTINGS_FILE_NAME = "settings.json"
+GUI_LOG_FILE_NAME = "transcript_scan.log"
+BLASTN_WORD_SIZES = {7, 11, 15}
+MEGABLAST_WORD_SIZES = {16, 20, 24, 28, 32, 48, 64}
+VERSIONED_REFSEQ_TRANSCRIPT_RE = re.compile(r"^(?:NM|XM|NR|XR)_\d+\.\d+$", re.IGNORECASE)
+CONTACT_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 CSV_COLUMNS = [
     "query_id",
     "subject_id",
@@ -74,6 +88,7 @@ class AntisenseQuery:
     species: str = ""
     notes: str = ""
     sequence_type: str = "AS"
+    blast_query_id: str = field(default="", compare=False)
     source_fields: dict[str, object] = field(default_factory=dict, compare=False, repr=False)
 
 
@@ -106,6 +121,73 @@ class TranscriptMatch:
     mismatch_positions_1based: tuple[int, ...]
     as_mismatch_positions_1based: tuple[int, ...]
     sequence_type: str = "AS"
+
+
+@dataclass(frozen=True)
+class TranscriptTargetResult:
+    """Retrieval and validation status for one private-panel transcript."""
+
+    requested_accession: str
+    retrieved_accession: str = ""
+    transcript_name: str = ""
+    sequence_5to3: str = field(default="", repr=False)
+    sequence_length_nt: int = 0
+    cache_path: str = ""
+    cache_status: str = ""
+    exact_version_match: bool = False
+    sequence_sha256: str = ""
+    retrieved_at_utc: str = ""
+    status: str = "error"
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class QueryTargetSummary:
+    """One status row for a guide-versus-transcript panel comparison."""
+
+    query_name: str
+    sequence_type: str
+    requested_accession: str
+    retrieved_accession: str
+    target_status: str
+    scan_status: str
+    scan_regions: str
+    match_count: int
+    exact_match_count: int
+    best_mismatches: int | None
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class ComparisonResult:
+    """One compact best-result row for a query, transcript, and scan region."""
+
+    input_order: int
+    query_name: str
+    target_accession: str
+    scan_region: str
+    region_start: int
+    region_end: int
+    result: str
+    sites_within_threshold: int
+    best_mismatches: int | None
+    mismatch_positions_in_query_1based: tuple[int, ...] = ()
+    best_transcript_start: int | None = None
+    best_transcript_end: int | None = None
+    query_region_5to3: str = ""
+    best_match_in_query_orientation_5to3: str = ""
+    differences: str = ""
+
+
+@dataclass(frozen=True)
+class PrivatePanelScanResult:
+    """Complete result of a private local transcript-panel scan."""
+
+    targets: tuple[TranscriptTargetResult, ...]
+    matches: tuple[TranscriptMatch, ...]
+    summaries: tuple[QueryTargetSummary, ...]
+    closest_matches: tuple[TranscriptMatch, ...] = ()
+    comparison_results: tuple[ComparisonResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -145,6 +227,28 @@ def sanitize_fasta_name(name: str) -> str:
     return cleaned or "oligo_query"
 
 
+def assign_unique_blast_query_ids(records: Iterable[AntisenseQuery]) -> list[AntisenseQuery]:
+    """Return records with stable, unique FASTA identifiers.
+
+    Distinct input names can sanitize to the same FASTA identifier. Preserve the
+    first identifier unchanged and suffix later collisions in input order.
+    """
+    assigned = []
+    used: set[str] = set()
+    next_suffix: dict[str, int] = {}
+    for record in records:
+        base = sanitize_fasta_name(record.blast_query_id or record.name)
+        candidate = base
+        suffix = next_suffix.get(base, 2)
+        while candidate in used:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        next_suffix[base] = suffix
+        used.add(candidate)
+        assigned.append(replace(record, blast_query_id=candidate))
+    return assigned
+
+
 def normalize_sequence_type(value: str) -> str:
     cleaned = clean_text_for_id(value).upper()
     if cleaned not in {"AS", "SS"}:
@@ -165,12 +269,37 @@ def clean_text_for_id(value: object) -> str:
 
 def multi_fasta(records: Iterable[AntisenseQuery]) -> str:
     """Return a multi-FASTA string for one or more oligo queries."""
-    return "\n".join(fasta_record(record.name, record.sequence_5to3) for record in records)
+    prepared = assign_unique_blast_query_ids(records)
+    return "\n".join(
+        fasta_record(record.blast_query_id, record.sequence_5to3)
+        for record in prepared
+    )
+
+
+def resolve_blast_word_size(word_size: int, megablast: bool) -> int:
+    """Return a BLAST-mode-compatible word size or raise a clear error."""
+    if megablast and word_size == DEFAULT_WORD_SIZE:
+        return DEFAULT_MEGABLAST_WORD_SIZE
+    allowed = MEGABLAST_WORD_SIZES if megablast else BLASTN_WORD_SIZES
+    if word_size not in allowed:
+        mode = "megablast" if megablast else "blastn"
+        allowed_text = ", ".join(str(value) for value in sorted(allowed))
+        raise ValueError(
+            f"Invalid --word-size {word_size} for {mode}. "
+            f"Allowed values: {allowed_text}."
+        )
+    return word_size
 
 
 def require_email(email: str | None) -> str:
     """Return a usable NCBI contact email or raise a clear error."""
-    return email or DEFAULT_EMAIL
+    normalized = clean_text_for_id(email or DEFAULT_EMAIL)
+    if not CONTACT_EMAIL_RE.fullmatch(normalized):
+        raise ValueError(
+            "A valid contact email is required before downloading transcripts "
+            "from NCBI."
+        )
+    return normalized
 
 
 class NcbiHttpClient:
@@ -231,6 +360,7 @@ class NcbiBlastClient(NcbiHttpClient):
         megablast: bool = False,
         short_query_adjust: bool = True,
     ) -> BlastSubmission:
+        word_size = resolve_blast_word_size(word_size, megablast)
         if query_fasta is None:
             if query_sequence is None:
                 raise ValueError("Provide query_sequence or query_fasta for BLAST submission.")
@@ -610,16 +740,17 @@ def duplicate_sequence_groups(records: list[AntisenseQuery]) -> dict[str, list[s
 
 def input_query_rows(records: list[AntisenseQuery]) -> list[dict[str, object]]:
     """Return input query rows with duplicate annotations."""
-    duplicate_groups = duplicate_sequence_groups(records)
+    prepared_records = assign_unique_blast_query_ids(records)
+    duplicate_groups = duplicate_sequence_groups(prepared_records)
     rows = []
-    for index, record in enumerate(records, start=1):
+    for index, record in enumerate(prepared_records, start=1):
         sequence = normalize_rna(record.sequence_5to3)
         duplicate_names = duplicate_groups.get(sequence, [])
         output_row = {
             "input_order": index,
             "sequence_type": normalize_sequence_type(record.sequence_type),
             "antisense_name": record.name,
-            "blast_query_id": sanitize_fasta_name(record.name),
+            "blast_query_id": record.blast_query_id,
             "antisense_5to3": sequence,
             "length_nt": len(sequence),
             "target_accession": record.target_accession,
@@ -708,9 +839,309 @@ def transcript_cache_path(cache_dir: Path, accession: str) -> Path:
     return cache_dir / f"{sanitize_fasta_name(accession)}.fasta"
 
 
+def normalize_versioned_refseq_accession(accession: object) -> str:
+    """Return an uppercase versioned RefSeq transcript accession."""
+    normalized = clean_text_for_id(accession).upper()
+    if not VERSIONED_REFSEQ_TRANSCRIPT_RE.fullmatch(normalized):
+        raise ValueError(
+            "Private panel accessions must include an exact RefSeq transcript "
+            f"version such as NM_000041.4; received: {accession}"
+        )
+    return normalized
+
+
+def target_accession_values(value: object) -> list[str]:
+    """Normalize a scalar or repeatable argparse accession value."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = [value]
+    else:
+        values = list(value)
+    return [clean_text_for_id(item) for item in values if clean_text_for_id(item)]
+
+
+def read_target_accession_table(
+    path: Path,
+    accession_column: str | None = None,
+    sheet_name: str | int | None = None,
+) -> list[str]:
+    """Read versioned target accessions from text, CSV, or Excel."""
+    if not path.exists() or not path.is_file():
+        raise ValueError(f"Target accession table does not exist: {path}")
+    suffix = path.suffix.lower()
+    if suffix in {".txt", ".list"}:
+        values = [
+            line.strip()
+            for line in path.read_text(encoding="utf-8-sig").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if values and values[0].lower() in {
+            "target_accession",
+            "accession",
+            "refseq",
+            "refseq accession",
+        }:
+            values = values[1:]
+        if not values:
+            raise ValueError(f"No target accessions found in: {path}")
+        return values
+
+    import pandas as pd
+
+    if suffix in {".xlsx", ".xlsm", ".xls"}:
+        table = pd.read_excel(path, sheet_name=sheet_name or 0)
+    elif suffix in {".csv", ".tsv"}:
+        table = pd.read_csv(path, sep="\t" if suffix == ".tsv" else ",")
+    else:
+        raise ValueError(
+            "--target-table must be a .txt, .list, .csv, .tsv, or Excel file."
+        )
+    if table.empty:
+        raise ValueError(f"Target accession table is empty: {path}")
+
+    columns_by_lower = {clean_text_for_id(column).lower(): str(column) for column in table.columns}
+    if accession_column is None:
+        for candidate in ["target_accession", "accession", "refseq", "refseq accession"]:
+            if candidate in columns_by_lower:
+                accession_column = columns_by_lower[candidate]
+                break
+        if accession_column is None:
+            accession_column = str(table.columns[0])
+    if accession_column not in table.columns:
+        raise ValueError(f"Target table is missing accession column: {accession_column}")
+
+    accessions = []
+    for value in table[accession_column]:
+        if value is not None and not pd.isna(value):
+            cleaned = clean_text_for_id(value)
+            if cleaned:
+                accessions.append(cleaned)
+    if not accessions:
+        raise ValueError(f"No target accessions found in: {path}")
+    return accessions
+
+
+def panel_accessions_from_args(args: argparse.Namespace) -> list[str]:
+    """Return de-duplicated, exact-version target accessions for panel mode."""
+    raw_accessions = target_accession_values(args.target_accession)
+    if getattr(args, "target_table", None):
+        raw_accessions.extend(
+            read_target_accession_table(
+                args.target_table,
+                getattr(args, "target_column", None),
+                getattr(args, "target_sheet", None),
+            )
+        )
+    if not raw_accessions:
+        raise ValueError(
+            "Private panel mode requires at least one --target-accession or --target-table."
+        )
+
+    accessions = []
+    seen = set()
+    for raw_accession in raw_accessions:
+        accession = normalize_versioned_refseq_accession(raw_accession)
+        if accession not in seen:
+            seen.add(accession)
+            accessions.append(accession)
+    return accessions
+
+
+def extract_refseq_accession_from_header(header: str) -> str:
+    """Extract a versioned RefSeq transcript accession from a FASTA header."""
+    for token in re.split(r"[|\s]+", clean_text_for_id(header)):
+        if VERSIONED_REFSEQ_TRANSCRIPT_RE.fullmatch(token):
+            return token.upper()
+    return clean_text_for_id(header).split(maxsplit=1)[0].strip("|").upper()
+
+
+def format_cached_transcript_fasta(header: str, sequence: str, width: int = 80) -> str:
+    """Format a verified transcript while preserving its descriptive header."""
+    dna = normalize_dna(sequence)
+    lines = [f">{clean_text_for_id(header)}"]
+    lines.extend(dna[index : index + width] for index in range(0, len(dna), width))
+    return "\n".join(lines) + "\n"
+
+
+def transcript_target_from_fasta(
+    requested_accession: str,
+    fasta_text: str,
+    cache_path: Path,
+    cache_status: str,
+    retrieved_at_utc: str,
+) -> TranscriptTargetResult:
+    """Validate one fetched/cached transcript and build its target record."""
+    validate_single_transcript_record(fasta_text, f"Transcript {requested_accession}")
+    header = get_fasta_header(fasta_text)
+    if not header:
+        raise ValueError(f"Transcript {requested_accession} FASTA header is missing.")
+    retrieved_accession = extract_refseq_accession_from_header(header)
+    if retrieved_accession != requested_accession:
+        raise ValueError(
+            f"Requested exact RefSeq version {requested_accession}, but retrieved "
+            f"{retrieved_accession}."
+        )
+    sequence = fasta_or_plain_text_to_sequence(fasta_text)
+    sequence_dna = normalize_dna(sequence)
+    return TranscriptTargetResult(
+        requested_accession=requested_accession,
+        retrieved_accession=retrieved_accession,
+        transcript_name=header,
+        sequence_5to3=sequence,
+        sequence_length_nt=len(sequence),
+        cache_path=str(cache_path),
+        cache_status=cache_status,
+        exact_version_match=True,
+        sequence_sha256=hashlib.sha256(sequence_dna.encode("ascii")).hexdigest(),
+        retrieved_at_utc=retrieved_at_utc,
+        status="ready",
+    )
+
+
+def retrieve_transcript_targets(
+    accessions: list[str],
+    *,
+    email: str,
+    tool: str = DEFAULT_TOOL,
+    cache_dir: Path,
+    offline: bool = False,
+    refresh: bool = False,
+    request_seconds: int = DEFAULT_REQUEST_SECONDS,
+    client: NcbiHttpClient | None = None,
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> list[TranscriptTargetResult]:
+    """Retrieve public transcript references without transmitting guide sequences."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    http_client = client
+
+    results = []
+    total = len(accessions)
+    for index, accession in enumerate(accessions, start=1):
+        if progress_callback:
+            progress_callback(index - 1, total, accession, "starting")
+        if cancel_check and cancel_check():
+            for cancelled_index, cancelled_accession in enumerate(
+                accessions[index - 1 :],
+                start=index,
+            ):
+                cancelled_path = transcript_cache_path(cache_dir, cancelled_accession)
+                results.append(
+                    TranscriptTargetResult(
+                        requested_accession=cancelled_accession,
+                        cache_path=str(cancelled_path),
+                        cache_status=(
+                            "cache" if cancelled_path.exists() else "missing"
+                        ),
+                        status="error",
+                        error="Transcript retrieval cancelled by user.",
+                    )
+                )
+                if progress_callback:
+                    progress_callback(
+                        cancelled_index,
+                        total,
+                        cancelled_accession,
+                        "cancelled",
+                    )
+            break
+        cache_path = transcript_cache_path(cache_dir, accession)
+        cache_existed = cache_path.exists()
+        try:
+            if cache_existed and not refresh:
+                fasta_text = cache_path.read_text(encoding="utf-8-sig")
+                retrieved_at = datetime.fromtimestamp(
+                    cache_path.stat().st_mtime,
+                    tz=timezone.utc,
+                ).isoformat()
+                target = transcript_target_from_fasta(
+                    accession,
+                    fasta_text,
+                    cache_path,
+                    "cache",
+                    retrieved_at,
+                )
+            elif offline:
+                raise ValueError(
+                    f"Offline mode requires cached transcript {accession} at {cache_path}."
+                )
+            else:
+                if http_client is None:
+                    http_client = NcbiHttpClient(
+                        email=require_email(email),
+                        tool=tool,
+                        request_seconds=max(request_seconds, DEFAULT_REQUEST_SECONDS),
+                    )
+                request_email = require_email(
+                    getattr(http_client, "email", None) or email
+                )
+                fasta_text = http_client.get_text(
+                    EFETCH_URL,
+                    {
+                        "db": "nuccore",
+                        "id": accession,
+                        "rettype": "fasta",
+                        "retmode": "text",
+                        "tool": tool,
+                        "email": request_email,
+                    },
+                )
+                retrieved_at = datetime.now(timezone.utc).isoformat()
+                target = transcript_target_from_fasta(
+                    accession,
+                    fasta_text,
+                    cache_path,
+                    "refreshed" if cache_existed else "downloaded",
+                    retrieved_at,
+                )
+                cache_path.write_text(
+                    format_cached_transcript_fasta(target.transcript_name, target.sequence_5to3),
+                    encoding="utf-8",
+                )
+            results.append(target)
+        except Exception as error:
+            results.append(
+                TranscriptTargetResult(
+                    requested_accession=accession,
+                    cache_path=str(cache_path),
+                    cache_status=(
+                        "refresh_failed"
+                        if refresh and cache_path.exists()
+                        else "missing" if not cache_path.exists() else "invalid"
+                    ),
+                    status="error",
+                    error=str(error),
+                )
+            )
+        if progress_callback:
+            progress_status = (
+                results[-1].cache_status
+                if results[-1].status == "ready"
+                else results[-1].status
+            )
+            progress_callback(index, total, accession, progress_status)
+    return results
+
+
+def validate_single_transcript_record(text: str, source_label: str) -> None:
+    """Reject multi-record FASTA instead of concatenating transcript records."""
+    record_count = sum(
+        1
+        for raw_line in str(text).splitlines()
+        if raw_line.lstrip().startswith(">")
+    )
+    if record_count > 1:
+        raise ValueError(
+            f"{source_label} contains {record_count} FASTA records. "
+            "The current local transcript scanner accepts exactly one transcript "
+            "record per target; use separate one-record FASTA files."
+        )
+
+
 def fetch_transcript_fasta(
     accession: str,
-    email: str,
+    email: str | None,
     tool: str = DEFAULT_TOOL,
     cache_dir: Path | None = None,
 ) -> str:
@@ -720,7 +1151,8 @@ def fetch_transcript_fasta(
         if cache_path.exists():
             return cache_path.read_text(encoding="utf-8-sig")
 
-    client = NcbiHttpClient(email=email, tool=tool)
+    request_email = require_email(email)
+    client = NcbiHttpClient(email=request_email, tool=tool)
     text = client.get_text(
         EFETCH_URL,
         {
@@ -729,7 +1161,7 @@ def fetch_transcript_fasta(
             "rettype": "fasta",
             "retmode": "text",
             "tool": tool,
-            "email": email,
+            "email": request_email,
         },
     )
     if not text.lstrip().startswith(">"):
@@ -760,17 +1192,20 @@ def read_transcript_input(
     if accession:
         fasta_text = fetch_transcript_fasta(
             accession,
-            email=require_email(email),
+            email=email,
             tool=tool,
             cache_dir=cache_dir,
         )
+        validate_single_transcript_record(fasta_text, f"NCBI record {accession}")
         return get_fasta_header(fasta_text) or accession, fasta_or_plain_text_to_sequence(fasta_text)
 
     if transcript_file:
         text = transcript_file.read_text(encoding="utf-8-sig")
+        validate_single_transcript_record(text, str(transcript_file))
         return get_fasta_header(text) or transcript_file.name, fasta_or_plain_text_to_sequence(text)
 
     assert transcript_sequence is not None
+    validate_single_transcript_record(transcript_sequence, "--target-sequence")
     return get_fasta_header(transcript_sequence) or "target_transcript", fasta_or_plain_text_to_sequence(transcript_sequence)
 
 
@@ -1089,10 +1524,156 @@ def transcript_match_rows(
     return rows
 
 
+def comparison_result_for_region(
+    *,
+    input_order: int,
+    query: AntisenseQuery,
+    target_accession: str,
+    scan_region: AntisenseRegion,
+    passing_matches: Iterable[TranscriptMatch] = (),
+    all_matches: Iterable[TranscriptMatch] = (),
+    target_error: str = "",
+) -> ComparisonResult:
+    """Build one user-facing best comparison for a query/target/region."""
+    query_region, region_start, region_end = antisense_region_sequence(
+        query.sequence_5to3,
+        scan_region,
+    )
+    passing = sorted(
+        passing_matches,
+        key=lambda match: (match.mismatches, match.transcript_start),
+    )
+    candidates = sorted(
+        all_matches,
+        key=lambda match: (match.mismatches, match.transcript_start),
+    )
+    best = passing[0] if passing else candidates[0] if candidates else None
+
+    if target_error:
+        result = "target_error"
+    elif passing:
+        result = "exact_match" if best and best.mismatches == 0 else "match"
+    else:
+        result = "no_match"
+
+    mismatch_positions: tuple[int, ...] = ()
+    differences = ""
+    if best is not None:
+        mismatch_positions = tuple(
+            region_start + position - 1
+            for position in best.as_mismatch_positions_1based
+        )
+        difference_items = []
+        for relative_position, (expected_base, observed_base) in enumerate(
+            zip(query_region, best.transcript_match_as_5to3),
+            start=1,
+        ):
+            if expected_base != observed_base:
+                full_position = region_start + relative_position - 1
+                difference_items.append(
+                    f"{full_position}:{expected_base}>{observed_base}"
+                )
+        differences = "; ".join(difference_items) or "None"
+
+    return ComparisonResult(
+        input_order=input_order,
+        query_name=query.name,
+        target_accession=target_accession,
+        scan_region=scan_region.name,
+        region_start=region_start,
+        region_end=region_end,
+        result=result,
+        sites_within_threshold=len(passing),
+        best_mismatches=best.mismatches if best is not None else None,
+        mismatch_positions_in_query_1based=mismatch_positions,
+        best_transcript_start=best.transcript_start if best is not None else None,
+        best_transcript_end=best.transcript_end if best is not None else None,
+        query_region_5to3=query_region,
+        best_match_in_query_orientation_5to3=(
+            best.transcript_match_as_5to3 if best is not None else ""
+        ),
+        differences=differences,
+    )
+
+
+def comparison_result_rows(
+    results: Iterable[ComparisonResult],
+) -> list[dict[str, object]]:
+    """Project compact comparison results into the agreed workbook schema."""
+    return [
+        {
+            "input_order": result.input_order,
+            "query_name": result.query_name,
+            "target_accession": result.target_accession,
+            "scan_region": result.scan_region,
+            "region_start": result.region_start,
+            "region_end": result.region_end,
+            "result": result.result,
+            "sites_within_threshold": result.sites_within_threshold,
+            "best_mismatches": result.best_mismatches,
+            "mismatch_positions_in_query_1based": ";".join(
+                str(position)
+                for position in result.mismatch_positions_in_query_1based
+            ),
+            "best_transcript_start": result.best_transcript_start,
+            "best_transcript_end": result.best_transcript_end,
+            "query_region_5to3": result.query_region_5to3,
+            "best_match_in_query_orientation_5to3": (
+                result.best_match_in_query_orientation_5to3
+            ),
+            "differences": result.differences,
+        }
+        for result in results
+    ]
+
+
+def transcript_target_rows(
+    targets: Iterable[TranscriptTargetResult],
+) -> list[dict[str, object]]:
+    """Return public transcript retrieval metadata without duplicating sequences."""
+    return [
+        {
+            "requested_accession": target.requested_accession,
+            "retrieved_accession": target.retrieved_accession,
+            "transcript_name": target.transcript_name,
+            "sequence_length_nt": target.sequence_length_nt,
+            "cache_path": target.cache_path,
+            "cache_status": target.cache_status,
+            "exact_version_match": target.exact_version_match,
+            "sequence_sha256": target.sequence_sha256,
+            "retrieved_at_utc": target.retrieved_at_utc,
+            "status": target.status,
+            "error": target.error,
+        }
+        for target in targets
+    ]
+
+
+def query_target_summary_rows(
+    summaries: Iterable[QueryTargetSummary],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "query_name": summary.query_name,
+            "sequence_type": summary.sequence_type,
+            "requested_accession": summary.requested_accession,
+            "retrieved_accession": summary.retrieved_accession,
+            "target_status": summary.target_status,
+            "scan_status": summary.scan_status,
+            "scan_regions": summary.scan_regions,
+            "match_count": summary.match_count,
+            "exact_match_count": summary.exact_match_count,
+            "best_mismatches": summary.best_mismatches,
+            "error": summary.error,
+        }
+        for summary in summaries
+    ]
+
+
 def query_length_by_blast_id(queries: Iterable[AntisenseQuery]) -> dict[str, int]:
     return {
-        sanitize_fasta_name(query.name): len(normalize_rna(query.sequence_5to3))
-        for query in queries
+        query.blast_query_id: len(normalize_rna(query.sequence_5to3))
+        for query in assign_unique_blast_query_ids(queries)
     }
 
 
@@ -1168,7 +1749,9 @@ def metadata_rows(
     scan_regions: list[AntisenseRegion],
     started_at: str,
     completed_at: str,
+    panel_targets: Iterable[TranscriptTargetResult] | None = None,
 ) -> list[dict[str, object]]:
+    target_list = list(panel_targets or [])
     metadata = {
         "started_at_utc": started_at,
         "completed_at_utc": completed_at,
@@ -1190,6 +1773,18 @@ def metadata_rows(
         "blast_filter_max_mismatches": args.filter_max_mismatches,
         "blast_filter_max_gap_opens": args.filter_max_gap_opens,
         "blast_filter_min_alignment_fraction": args.filter_min_alignment_fraction,
+        "privacy_mode": (
+            "remote_blast_query_submission"
+            if args.blast or args.blast_only
+            else "local_guide_scan"
+        ),
+        "guide_sequence_transmitted_to_ncbi": bool(args.blast or args.blast_only),
+        "private_panel_mode": bool(getattr(args, "private_panel", False)),
+        "offline_mode": bool(getattr(args, "offline", False)),
+        "refresh_targets": bool(getattr(args, "refresh_targets", False)),
+        "panel_target_count": len(target_list),
+        "panel_targets_ready": sum(target.status == "ready" for target in target_list),
+        "panel_targets_error": sum(target.status == "error" for target in target_list),
     }
     return [{"key": key, "value": value} for key, value in metadata.items()]
 
@@ -1208,12 +1803,93 @@ def default_result_workbook(args: argparse.Namespace) -> Path | None:
         return args.result_workbook
     source = args.as_table or args.as_file or getattr(args, "ss_table", None) or getattr(args, "ss_file", None)
     if source and not args.output and not args.blast_output:
-        return source.with_name(f"{source.stem}_ncbi_blast_results.xlsx")
+        workflow = "ncbi_blast" if args.blast or args.blast_only else "ncbi_transcript_scan"
+        return source.with_name(f"{source.stem}_{workflow}_results.xlsx")
     return None
 
 
+def private_panel_requested(args: argparse.Namespace) -> bool:
+    return bool(
+        getattr(args, "private_panel", False)
+        or getattr(args, "target_table", None)
+        or getattr(args, "offline", False)
+        or getattr(args, "refresh_targets", False)
+        or getattr(args, "download_targets_only", False)
+        or len(target_accession_values(args.target_accession)) > 1
+    )
+
+
+def default_private_panel_workbook(args: argparse.Namespace) -> Path:
+    if args.result_workbook:
+        return args.result_workbook
+    source = (
+        args.as_table
+        or args.as_file
+        or getattr(args, "ss_table", None)
+        or getattr(args, "ss_file", None)
+        or getattr(args, "target_table", None)
+    )
+    if source:
+        return source.with_name(f"{source.stem}_private_transcript_panel_results.xlsx")
+    return Path("private_transcript_panel_results.xlsx")
+
+
+def private_panel_cache_dir(args: argparse.Namespace) -> Path:
+    return args.cache_dir or Path(".ncbi_transcript_cache")
+
+
+def application_base_dir() -> Path:
+    """Return the portable app folder or the repository root during development."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+def application_data_dir() -> Path:
+    """Return the writable data subfolder kept beside the portable app."""
+    return application_base_dir() / APP_DATA_DIR_NAME
+
+
+def gui_settings_path() -> Path:
+    return application_data_dir() / GUI_SETTINGS_FILE_NAME
+
+
+def gui_log_path() -> Path:
+    return application_data_dir() / "logs" / GUI_LOG_FILE_NAME
+
+
+def load_gui_settings() -> dict[str, object]:
+    """Load portable per-user settings, returning an empty mapping if unavailable."""
+    path = gui_settings_path()
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def save_gui_settings(settings: dict[str, object]) -> Path:
+    """Atomically save portable settings beside the packaged application."""
+    path = gui_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(
+        json.dumps(settings, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+    return path
+
+
+def shared_gui_transcript_cache_dir() -> Path:
+    """Return the persistent transcript cache inside the portable data folder."""
+    return application_data_dir() / "transcript_cache"
+
+
 def default_gui_result_workbook(input_file: Path) -> Path:
-    return input_file.with_name(f"{input_file.stem}_ncbi_blast_results.xlsx")
+    return input_file.with_name(f"{input_file.stem}_ncbi_transcript_scan_results.xlsx")
 
 
 def write_result_workbook(
@@ -1227,15 +1903,37 @@ def write_result_workbook(
     completed_at: str,
     *,
     include_blast_sheets: bool = True,
+    comparison_results: list[ComparisonResult] | None = None,
+    transcript_targets: list[TranscriptTargetResult] | None = None,
+    query_target_summaries: list[QueryTargetSummary] | None = None,
+    closest_local_matches: list[TranscriptMatch] | None = None,
 ) -> None:
     raw_blast_rows = blast_raw_rows(blast_results, queries)
     sheets = {
         "input_queries": input_query_rows(queries),
-        "local_transcript_scan": transcript_match_rows(
+    }
+    if comparison_results is not None:
+        sheets["comparison_results"] = comparison_result_rows(comparison_results)
+        sheets["local_transcript_scan"] = transcript_match_rows(
             local_matches,
             include_as_oriented_match=False,
-        ),
-    }
+        )
+        if transcript_targets is not None:
+            sheets["transcript_targets"] = transcript_target_rows(transcript_targets)
+    else:
+        if transcript_targets is not None:
+            sheets["transcript_targets"] = transcript_target_rows(transcript_targets)
+        sheets["local_transcript_scan"] = transcript_match_rows(
+            local_matches,
+            include_as_oriented_match=False,
+        )
+    if query_target_summaries is not None:
+        sheets["query_target_summary"] = query_target_summary_rows(query_target_summaries)
+    if closest_local_matches is not None:
+        sheets["closest_transcript_windows"] = transcript_match_rows(
+            closest_local_matches,
+            include_as_oriented_match=False,
+        )
     if include_blast_sheets:
         sheets.update(
             {
@@ -1255,6 +1953,7 @@ def write_result_workbook(
         scan_regions,
         started_at,
         completed_at,
+        transcript_targets,
     )
     write_excel_workbook(path, sheets)
 
@@ -1276,7 +1975,7 @@ def choose_sheet_gui(root, input_file: Path) -> str | None:
 
     selected = {"value": sheets[0]}
     window = tk.Toplevel(root)
-    window.title("Select AS table sheet")
+    window.title("Select transcript scan sheet")
     window.resizable(False, False)
     window.columnconfigure(1, weight=1)
 
@@ -1323,6 +2022,574 @@ def default_header(headers: list[str], candidates: list[str], fallback: str | No
     return fallback if fallback is not None else headers[0]
 
 
+def prompt_and_save_ncbi_email(root, current_email: str = "") -> str | None:
+    """Ask for a valid NCBI contact email and save it in portable settings."""
+    from tkinter import messagebox, simpledialog
+
+    initial_value = clean_text_for_id(current_email)
+    while True:
+        entered = simpledialog.askstring(
+            "NCBI contact email",
+            "Enter your contact email for NCBI transcript requests.\n\n"
+            "It is saved locally in TranscriptScanData\\settings.json.",
+            initialvalue=initial_value,
+            parent=root,
+        )
+        if entered is None:
+            return None
+        try:
+            email = require_email(entered)
+        except ValueError as error:
+            messagebox.showerror("Invalid email", str(error), parent=root)
+            initial_value = clean_text_for_id(entered)
+            continue
+
+        settings = load_gui_settings()
+        settings["ncbi_email"] = email
+        try:
+            save_gui_settings(settings)
+        except OSError as error:
+            messagebox.showerror(
+                "Cannot save settings",
+                "The app folder must be writable so the email and transcript "
+                f"cache can be saved.\n\n{error}",
+                parent=root,
+            )
+            return None
+        return email
+
+
+def saved_or_prompted_ncbi_email(root) -> str | None:
+    """Return the saved email, prompting on first use or invalid settings."""
+    saved = clean_text_for_id(load_gui_settings().get("ncbi_email", ""))
+    try:
+        return require_email(saved)
+    except ValueError:
+        return prompt_and_save_ncbi_email(root, saved)
+
+
+def choose_ncbi_gui_mode(root, ncbi_email: str) -> tuple[str | None, str]:
+    """Choose the simple single-sequence workflow or the existing Excel workflow."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    selected = {"mode": None, "email": ncbi_email}
+    window = tk.Toplevel(root)
+    window.title("Private local transcript scan")
+    window.resizable(False, False)
+
+    ttk.Label(
+        window,
+        text="Choose an input workflow",
+        font=("TkDefaultFont", 11, "bold"),
+    ).grid(row=0, column=0, columnspan=2, padx=20, pady=(20, 12), sticky="w")
+    ttk.Label(
+        window,
+        text=(
+            "Both workflows compare locally. Transcript accessions may be sent "
+            "to NCBI, but oligo sequences are not."
+        ),
+        wraplength=480,
+    ).grid(row=1, column=0, columnspan=2, padx=20, pady=(0, 16), sticky="w")
+
+    email_var = tk.StringVar(value=ncbi_email)
+    email_frame = ttk.Frame(window)
+    email_frame.grid(row=2, column=0, columnspan=2, padx=20, pady=(0, 16), sticky="ew")
+    ttk.Label(email_frame, text="NCBI contact email:").grid(row=0, column=0, sticky="w")
+    ttk.Label(email_frame, textvariable=email_var).grid(
+        row=0, column=1, padx=(6, 12), sticky="w"
+    )
+
+    def change_email() -> None:
+        changed = prompt_and_save_ncbi_email(window, str(selected["email"]))
+        if changed:
+            selected["email"] = changed
+            email_var.set(changed)
+
+    ttk.Button(email_frame, text="Change", command=change_email).grid(
+        row=0, column=2, sticky="e"
+    )
+
+    def open_app_data_folder() -> None:
+        try:
+            data_dir = application_data_dir()
+            data_dir.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(data_dir))
+        except Exception as error:
+            from tkinter import messagebox
+
+            messagebox.showerror(
+                "Cannot open app data folder",
+                str(error),
+                parent=window,
+            )
+
+    ttk.Button(
+        email_frame,
+        text="Open app data",
+        command=open_app_data_folder,
+    ).grid(row=0, column=3, padx=(8, 0), sticky="e")
+
+    def choose(mode: str) -> None:
+        selected["mode"] = mode
+        window.destroy()
+
+    ttk.Button(
+        window,
+        text="Single sequence and one transcript",
+        command=lambda: choose("single"),
+        width=34,
+    ).grid(row=3, column=0, padx=(20, 8), pady=(0, 20), sticky="ew")
+    ttk.Button(
+        window,
+        text="Excel sequence table",
+        command=lambda: choose("excel"),
+        width=26,
+    ).grid(row=3, column=1, padx=(8, 20), pady=(0, 20), sticky="ew")
+
+    window.protocol("WM_DELETE_WINDOW", window.destroy)
+    window.bind("<Escape>", lambda _event: window.destroy())
+    window.grab_set()
+    window.wait_window()
+    return selected["mode"], str(selected["email"])
+
+
+def choose_single_sequence_gui_settings(root) -> dict[str, object] | None:
+    """Collect one local AS/SS-versus-transcript scan from the user."""
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    selected: dict[str, object] = {}
+    cache_dir = shared_gui_transcript_cache_dir()
+    window = tk.Toplevel(root)
+    window.title("Single sequence transcript scan")
+    window.resizable(False, False)
+    window.columnconfigure(1, weight=1)
+
+    sequence_type_var = tk.StringVar(value="AS")
+    sequence_name_var = tk.StringVar()
+    accession_var = tk.StringVar()
+    full_region_var = tk.BooleanVar(value=True)
+    seed_region_var = tk.BooleanVar(value=False)
+    core_region_var = tk.BooleanVar(value=False)
+    max_mismatches_var = tk.StringVar(value=str(DEFAULT_MAX_MISMATCHES))
+    closest_var = tk.StringVar(value=str(DEFAULT_SINGLE_GUI_CLOSEST_MATCHES))
+    refresh_var = tk.BooleanVar(value=False)
+
+    ttk.Label(window, text="Sequence type").grid(
+        row=0, column=0, padx=16, pady=(16, 8), sticky="w"
+    )
+    ttk.Combobox(
+        window,
+        textvariable=sequence_type_var,
+        values=["AS", "SS"],
+        state="readonly",
+        width=10,
+    ).grid(row=0, column=1, padx=16, pady=(16, 8), sticky="w")
+
+    ttk.Label(window, text="Sequence name (optional)").grid(
+        row=1, column=0, padx=16, pady=8, sticky="w"
+    )
+    ttk.Entry(window, textvariable=sequence_name_var, width=48).grid(
+        row=1, column=1, padx=16, pady=8, sticky="ew"
+    )
+
+    ttk.Label(window, text="Sequence, 5' to 3'").grid(
+        row=2, column=0, padx=16, pady=8, sticky="nw"
+    )
+    sequence_text = tk.Text(window, width=50, height=4, wrap="word")
+    sequence_text.grid(row=2, column=1, padx=16, pady=8, sticky="ew")
+
+    ttk.Label(window, text="Exact RefSeq transcript").grid(
+        row=3, column=0, padx=16, pady=8, sticky="w"
+    )
+    ttk.Entry(window, textvariable=accession_var, width=30).grid(
+        row=3, column=1, padx=16, pady=8, sticky="w"
+    )
+    ttk.Label(
+        window,
+        text="Include the version, for example NM_002439.5.",
+    ).grid(row=4, column=1, padx=16, pady=(0, 8), sticky="w")
+
+    ttk.Label(window, text="Scan regions").grid(
+        row=5, column=0, padx=16, pady=8, sticky="nw"
+    )
+    region_frame = ttk.Frame(window)
+    region_frame.grid(row=5, column=1, padx=16, pady=8, sticky="w")
+    ttk.Checkbutton(
+        region_frame,
+        text="Full sequence",
+        variable=full_region_var,
+    ).grid(row=0, column=0, padx=(0, 16), sticky="w")
+    ttk.Checkbutton(
+        region_frame,
+        text="Seed (positions 2-8)",
+        variable=seed_region_var,
+    ).grid(row=0, column=1, padx=(0, 16), sticky="w")
+    ttk.Checkbutton(
+        region_frame,
+        text="Core (positions 2-18)",
+        variable=core_region_var,
+    ).grid(row=0, column=2, sticky="w")
+
+    ttk.Label(window, text="Maximum mismatches").grid(
+        row=6, column=0, padx=16, pady=8, sticky="w"
+    )
+    ttk.Entry(window, textvariable=max_mismatches_var, width=8).grid(
+        row=6, column=1, padx=16, pady=8, sticky="w"
+    )
+
+    ttk.Label(window, text="Closest windows per region").grid(
+        row=7, column=0, padx=16, pady=8, sticky="w"
+    )
+    ttk.Entry(window, textvariable=closest_var, width=8).grid(
+        row=7, column=1, padx=16, pady=8, sticky="w"
+    )
+
+    option_frame = ttk.Frame(window)
+    option_frame.grid(row=8, column=0, columnspan=2, padx=16, pady=8, sticky="w")
+    ttk.Label(
+        option_frame,
+        text=(
+            "Cache behavior: use the saved transcript when available; "
+            "download it automatically when missing."
+        ),
+        wraplength=560,
+    ).grid(row=0, column=0, sticky="w")
+    ttk.Checkbutton(
+        option_frame,
+        text="Refresh this transcript from NCBI",
+        variable=refresh_var,
+    ).grid(row=1, column=0, pady=(4, 0), sticky="w")
+
+    cache_frame = ttk.Frame(window)
+    cache_frame.grid(row=9, column=0, columnspan=2, padx=16, pady=8, sticky="ew")
+    ttk.Label(
+        cache_frame,
+        text=f"Shared transcript cache: {cache_dir}",
+        wraplength=520,
+    ).grid(row=0, column=0, padx=(0, 8), sticky="w")
+
+    def open_cache_folder() -> None:
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(cache_dir))
+        except Exception as error:
+            messagebox.showerror("Cannot open cache folder", str(error), parent=window)
+
+    ttk.Button(cache_frame, text="Open cache folder", command=open_cache_folder).grid(
+        row=0, column=1, sticky="e"
+    )
+    ttk.Label(
+        window,
+        text=(
+            "Privacy: only the public transcript accession may be sent to NCBI. "
+            "The entered oligo sequence stays on this computer."
+        ),
+        wraplength=560,
+    ).grid(row=10, column=0, columnspan=2, padx=16, pady=(4, 8), sticky="w")
+
+    buttons = ttk.Frame(window)
+    buttons.grid(row=11, column=0, columnspan=2, padx=16, pady=(8, 16), sticky="e")
+
+    def use_settings() -> None:
+        try:
+            sequence = normalize_rna(sequence_text.get("1.0", "end").strip())
+            if not sequence:
+                raise ValueError("Enter one AS or SS sequence.")
+            accession = normalize_versioned_refseq_accession(accession_var.get())
+            scan_regions = []
+            if full_region_var.get():
+                scan_regions.append("full")
+            if seed_region_var.get():
+                scan_regions.append("seed:2-8")
+            if core_region_var.get():
+                scan_regions.append("core:2-18")
+            if not scan_regions:
+                raise ValueError("Select at least one scan region.")
+            for region in parse_scan_regions(scan_regions):
+                antisense_region_sequence(sequence, region)
+            max_mismatches = int(max_mismatches_var.get())
+            if max_mismatches < 0:
+                raise ValueError("Maximum mismatches must be 0 or greater.")
+            closest = int(closest_var.get())
+            if closest < 1:
+                raise ValueError("Closest windows must be 1 or greater.")
+        except ValueError as error:
+            messagebox.showerror("Invalid settings", str(error), parent=window)
+            return
+
+        selected.update(
+            {
+                "sequence_type": sequence_type_var.get(),
+                "sequence_name": sequence_name_var.get().strip() or None,
+                "sequence": sequence,
+                "target_accession": accession,
+                "scan_regions": scan_regions,
+                "max_mismatches": max_mismatches,
+                "closest": closest,
+                "refresh_targets": refresh_var.get(),
+                "cache_dir": cache_dir,
+            }
+        )
+        window.destroy()
+
+    ttk.Button(buttons, text="Cancel", command=window.destroy).grid(
+        row=0, column=0, padx=(0, 8)
+    )
+    ttk.Button(buttons, text="Run local scan", command=use_settings).grid(
+        row=0, column=1
+    )
+    window.protocol("WM_DELETE_WINDOW", window.destroy)
+    window.bind("<Escape>", lambda _event: window.destroy())
+    window.grab_set()
+    window.wait_window()
+    return selected or None
+
+
+def single_sequence_gui_args(settings: dict[str, object]) -> argparse.Namespace:
+    """Translate validated single-sequence GUI settings into normal CLI arguments."""
+    sequence_type = normalize_sequence_type(str(settings["sequence_type"]))
+    sequence_flag = "--as-sequence" if sequence_type == "AS" else "--ss-sequence"
+    name_flag = "--as-name" if sequence_type == "AS" else "--ss-name"
+    argv = [
+        sequence_flag,
+        str(settings["sequence"]),
+        "--private-panel",
+        "--target-accession",
+        str(settings["target_accession"]),
+        "--cache-dir",
+        str(settings.get("cache_dir") or shared_gui_transcript_cache_dir()),
+        "--email",
+        str(settings.get("email", "")),
+        "--max-mismatches",
+        str(settings["max_mismatches"]),
+        "--closest",
+        str(settings.get("closest", DEFAULT_SINGLE_GUI_CLOSEST_MATCHES)),
+    ]
+    if settings.get("sequence_name"):
+        argv.extend([name_flag, str(settings["sequence_name"])])
+    for region in settings.get("scan_regions", ["full"]):
+        argv.extend(["--scan-region", str(region)])
+    if settings.get("refresh_targets"):
+        argv.append("--refresh-targets")
+    return build_parser().parse_args(argv)
+
+
+def run_single_sequence_scan(
+    args: argparse.Namespace,
+    *,
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+    client: NcbiHttpClient | None = None,
+) -> tuple[list[AntisenseQuery], list[AntisenseRegion], PrivatePanelScanResult]:
+    """Run one private local query against one exact-version transcript."""
+    accessions = panel_accessions_from_args(args)
+    if len(accessions) != 1:
+        raise ValueError("Single-sequence mode requires exactly one transcript accession.")
+    targets = retrieve_transcript_targets(
+        accessions,
+        email=args.email,
+        tool=args.tool,
+        cache_dir=private_panel_cache_dir(args),
+        offline=False,
+        refresh=bool(getattr(args, "refresh_targets", False)),
+        request_seconds=args.request_seconds,
+        client=client,
+        progress_callback=progress_callback,
+    )
+    target = targets[0]
+    if target.status != "ready":
+        raise ValueError(target.error or f"Transcript {accessions[0]} could not be prepared.")
+
+    queries = args_antisense_queries(args)
+    if len(queries) != 1:
+        raise ValueError("Single-sequence mode requires exactly one AS or SS sequence.")
+    scan_regions = parse_scan_regions(args.scan_region)
+    result = run_private_panel_scan(
+        queries,
+        targets,
+        scan_regions,
+        args.max_mismatches,
+        closest=args.closest,
+    )
+    return queries, scan_regions, result
+
+
+def format_single_sequence_scan_result(
+    args: argparse.Namespace,
+    queries: list[AntisenseQuery],
+    scan_regions: list[AntisenseRegion],
+    result: PrivatePanelScanResult,
+) -> str:
+    """Format a compact, copyable single-sequence result for the GUI."""
+    query = queries[0]
+    target = result.targets[0]
+    summary = result.summaries[0]
+    output = io.StringIO()
+    output.write("LOCAL SINGLE-SEQUENCE TRANSCRIPT SCAN\n")
+    output.write("=" * 37 + "\n\n")
+    output.write(f"Sequence type: {normalize_sequence_type(query.sequence_type)}\n")
+    output.write(f"Sequence name: {query.name}\n")
+    output.write(f"Sequence 5'->3': {normalize_rna(query.sequence_5to3)}\n")
+    output.write(f"Transcript accession: {target.retrieved_accession}\n")
+    output.write(f"Transcript: {target.transcript_name}\n")
+    output.write(f"Transcript length: {target.sequence_length_nt} nt\n")
+    output.write(f"Transcript source: {target.cache_status}\n")
+    output.write(f"Cache file: {target.cache_path}\n")
+    output.write("Guide sequence sent to NCBI: No\n")
+    output.write(
+        "Scan regions: " + ", ".join(region.name for region in scan_regions) + "\n"
+    )
+    output.write(f"Maximum mismatches: {args.max_mismatches}\n")
+    output.write(f"Matches within threshold: {summary.match_count}\n")
+    output.write(f"Exact matches: {summary.exact_match_count}\n")
+    output.write(
+        "Best mismatch count across selected regions: "
+        f"{summary.best_mismatches if summary.best_mismatches is not None else '-'}\n"
+    )
+
+    output.write("\nMATCHES WITHIN THRESHOLD\n")
+    output.write("-" * 24 + "\n")
+    if result.matches:
+        output.write(transcript_match_terminal_table(result.matches))
+        output.write("\n")
+    else:
+        output.write("No transcript windows passed the mismatch threshold.\n")
+
+    output.write("\nCLOSEST TRANSCRIPT WINDOWS\n")
+    output.write("-" * 26 + "\n")
+    output.write(
+        "Closest windows are not filtered by the mismatch threshold and do not model gaps.\n"
+    )
+    for region in scan_regions:
+        region_matches = [
+            match for match in result.closest_matches if match.scan_region == region.name
+        ]
+        output.write(f"\nRegion: {region.name}\n")
+        if region_matches:
+            output.write(transcript_match_terminal_table(region_matches))
+            output.write("\n")
+        else:
+            output.write("No windows available for this region.\n")
+    return output.getvalue().rstrip() + "\n"
+
+
+def show_single_sequence_result_gui(root, result_text: str) -> bool:
+    """Show a scrollable result and return True when the user requests another scan."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    new_scan = {"value": False}
+    window = tk.Toplevel(root)
+    window.title("Single sequence transcript scan result")
+    window.geometry("1100x700")
+    window.minsize(760, 480)
+    window.rowconfigure(0, weight=1)
+    window.columnconfigure(0, weight=1)
+
+    result_frame = ttk.Frame(window)
+    result_frame.grid(row=0, column=0, padx=12, pady=12, sticky="nsew")
+    result_frame.rowconfigure(0, weight=1)
+    result_frame.columnconfigure(0, weight=1)
+    output_text = tk.Text(
+        result_frame,
+        wrap="none",
+        font="TkFixedFont",
+        padx=8,
+        pady=8,
+    )
+    vertical = ttk.Scrollbar(result_frame, orient="vertical", command=output_text.yview)
+    horizontal = ttk.Scrollbar(result_frame, orient="horizontal", command=output_text.xview)
+    output_text.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+    output_text.grid(row=0, column=0, sticky="nsew")
+    vertical.grid(row=0, column=1, sticky="ns")
+    horizontal.grid(row=1, column=0, sticky="ew")
+    output_text.insert("1.0", result_text)
+    output_text.configure(state="disabled")
+
+    buttons = ttk.Frame(window)
+    buttons.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="e")
+
+    def copy_all() -> None:
+        root.clipboard_clear()
+        root.clipboard_append(result_text)
+        root.update()
+
+    def request_new_scan() -> None:
+        new_scan["value"] = True
+        window.destroy()
+
+    ttk.Button(buttons, text="Copy all", command=copy_all).grid(
+        row=0, column=0, padx=(0, 8)
+    )
+    ttk.Button(buttons, text="New scan", command=request_new_scan).grid(
+        row=0, column=1, padx=(0, 8)
+    )
+    ttk.Button(buttons, text="Close", command=window.destroy).grid(row=0, column=2)
+
+    window.protocol("WM_DELETE_WINDOW", window.destroy)
+    window.bind("<Escape>", lambda _event: window.destroy())
+    window.grab_set()
+    window.wait_window()
+    return new_scan["value"]
+
+
+def run_single_sequence_gui(root, ncbi_email: str) -> int:
+    """Run the one-sequence/one-transcript private local GUI workflow."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    while True:
+        settings = choose_single_sequence_gui_settings(root)
+        if not settings:
+            return 0
+        settings["email"] = ncbi_email
+        args = single_sequence_gui_args(settings)
+        validate_runtime_args(args)
+
+        progress_window = tk.Toplevel(root)
+        progress_window.title("Single sequence transcript scan")
+        progress_window.resizable(False, False)
+        status_var = tk.StringVar(value="Preparing transcript reference...")
+        ttk.Label(progress_window, textvariable=status_var, width=64).grid(
+            row=0, column=0, padx=16, pady=(16, 8), sticky="w"
+        )
+        progress_bar = ttk.Progressbar(
+            progress_window,
+            mode="determinate",
+            length=440,
+            maximum=1,
+        )
+        progress_bar.grid(row=1, column=0, padx=16, pady=(8, 16), sticky="ew")
+
+        def update_progress(
+            completed: int,
+            total: int,
+            accession: str,
+            status: str,
+        ) -> None:
+            progress_bar.configure(maximum=max(total, 1), value=completed)
+            status_var.set(f"{accession}: {status}")
+            progress_window.update()
+
+        try:
+            queries, scan_regions, result = run_single_sequence_scan(
+                args,
+                progress_callback=update_progress,
+            )
+        finally:
+            progress_window.destroy()
+
+        result_text = format_single_sequence_scan_result(
+            args,
+            queries,
+            scan_regions,
+            result,
+        )
+        if not show_single_sequence_result_gui(root, result_text):
+            return 0
+
+
 def choose_ncbi_gui_settings(root, headers: list[str]) -> dict[str, object] | None:
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
@@ -1335,10 +2602,11 @@ def choose_ncbi_gui_settings(root, headers: list[str]) -> dict[str, object] | No
     )
 
     window = tk.Toplevel(root)
-    window.title("NCBI transcript scan settings")
+    window.title("Private local transcript scan settings")
     window.resizable(False, False)
     window.columnconfigure(1, weight=1)
 
+    sequence_type_var = tk.StringVar(value="AS")
     as_column_var = tk.StringVar(
         value=default_header(headers, ["AS_5to3", "antisense", "as", "sequence"])
     )
@@ -1351,11 +2619,25 @@ def choose_ncbi_gui_settings(root, headers: list[str]) -> dict[str, object] | No
     target_column_var = tk.StringVar(value=target_accession_default or headers[0])
     refseq_var = tk.StringVar()
     transcript_file_var = tk.StringVar()
+    panel_accessions_var = tk.StringVar()
+    target_table_var = tk.StringVar()
     scan_regions_var = tk.StringVar(value="full")
     max_mismatches_var = tk.StringVar(value=str(DEFAULT_MAX_MISMATCHES))
+    offline_var = tk.BooleanVar(value=False)
 
-    ttk.Label(window, text="AS sequence column").grid(
+    ttk.Label(window, text="Sequence type").grid(
         row=0, column=0, padx=16, pady=(16, 8), sticky="w"
+    )
+    ttk.Combobox(
+        window,
+        textvariable=sequence_type_var,
+        values=["AS", "SS"],
+        state="readonly",
+        width=12,
+    ).grid(row=0, column=1, padx=16, pady=(16, 8), sticky="w")
+
+    ttk.Label(window, text="Sequence column").grid(
+        row=1, column=0, padx=16, pady=8, sticky="w"
     )
     ttk.Combobox(
         window,
@@ -1363,10 +2645,10 @@ def choose_ncbi_gui_settings(root, headers: list[str]) -> dict[str, object] | No
         values=headers,
         state="readonly",
         width=max(30, min(60, max(len(header) for header in headers) + 2)),
-    ).grid(row=0, column=1, padx=16, pady=(16, 8), sticky="ew")
+    ).grid(row=1, column=1, padx=16, pady=8, sticky="ew")
 
-    ttk.Label(window, text="AS name column").grid(
-        row=1, column=0, padx=16, pady=8, sticky="w"
+    ttk.Label(window, text="Sequence name column").grid(
+        row=2, column=0, padx=16, pady=8, sticky="w"
     )
     ttk.Combobox(
         window,
@@ -1374,13 +2656,13 @@ def choose_ncbi_gui_settings(root, headers: list[str]) -> dict[str, object] | No
         values=["", *headers],
         state="readonly",
         width=36,
-    ).grid(row=1, column=1, padx=16, pady=8, sticky="ew")
+    ).grid(row=2, column=1, padx=16, pady=8, sticky="ew")
 
     ttk.Label(window, text="Transcript source").grid(
-        row=2, column=0, padx=16, pady=8, sticky="nw"
+        row=3, column=0, padx=16, pady=8, sticky="nw"
     )
     source_frame = ttk.Frame(window)
-    source_frame.grid(row=2, column=1, padx=16, pady=8, sticky="ew")
+    source_frame.grid(row=3, column=1, padx=16, pady=8, sticky="ew")
     source_frame.columnconfigure(1, weight=1)
 
     ttk.Radiobutton(
@@ -1436,22 +2718,69 @@ def choose_ncbi_gui_settings(root, headers: list[str]) -> dict[str, object] | No
         row=5, column=1, padx=(8, 0), pady=(4, 0), sticky="e"
     )
 
+    ttk.Radiobutton(
+        source_frame,
+        text="Private panel: versioned RefSeq accessions",
+        variable=target_mode_var,
+        value="panel",
+    ).grid(row=6, column=0, columnspan=2, pady=(8, 0), sticky="w")
+    ttk.Entry(source_frame, textvariable=panel_accessions_var, width=38).grid(
+        row=7, column=0, columnspan=2, pady=(4, 8), sticky="ew"
+    )
+
+    ttk.Radiobutton(
+        source_frame,
+        text="Private panel: accession table",
+        variable=target_mode_var,
+        value="panel_table",
+    ).grid(row=8, column=0, columnspan=2, sticky="w")
+
+    def choose_target_table() -> None:
+        path = filedialog.askopenfilename(
+            parent=window,
+            title="Select target accession table",
+            filetypes=[
+                ("Target lists", "*.txt *.list *.csv *.tsv *.xlsx *.xlsm *.xls"),
+                ("All files", "*.*"),
+            ],
+        )
+        if path:
+            target_table_var.set(path)
+            target_mode_var.set("panel_table")
+
+    ttk.Entry(source_frame, textvariable=target_table_var, width=38).grid(
+        row=9, column=0, pady=(4, 0), sticky="ew"
+    )
+    ttk.Button(source_frame, text="Browse", command=choose_target_table).grid(
+        row=9, column=1, padx=(8, 0), pady=(4, 0), sticky="e"
+    )
+
     ttk.Label(window, text="Scan regions").grid(
-        row=3, column=0, padx=16, pady=8, sticky="w"
+        row=4, column=0, padx=16, pady=8, sticky="w"
     )
     ttk.Entry(window, textvariable=scan_regions_var, width=38).grid(
-        row=3, column=1, padx=16, pady=8, sticky="ew"
+        row=4, column=1, padx=16, pady=8, sticky="ew"
     )
 
     ttk.Label(window, text="Max mismatches").grid(
-        row=4, column=0, padx=16, pady=8, sticky="w"
+        row=5, column=0, padx=16, pady=8, sticky="w"
     )
     ttk.Entry(window, textvariable=max_mismatches_var, width=12).grid(
-        row=4, column=1, padx=16, pady=8, sticky="w"
+        row=5, column=1, padx=16, pady=8, sticky="w"
     )
 
+    ttk.Checkbutton(
+        window,
+        text="Offline: require every panel transcript in the local cache",
+        variable=offline_var,
+    ).grid(row=6, column=0, columnspan=2, padx=16, pady=8, sticky="w")
+    ttk.Label(
+        window,
+        text="Private panel mode sends transcript accessions to NCBI; guide sequences remain local.",
+    ).grid(row=7, column=0, columnspan=2, padx=16, pady=(0, 8), sticky="w")
+
     buttons = ttk.Frame(window)
-    buttons.grid(row=5, column=0, columnspan=2, padx=16, pady=(8, 16), sticky="e")
+    buttons.grid(row=8, column=0, columnspan=2, padx=16, pady=(8, 16), sticky="e")
 
     def use_settings() -> None:
         try:
@@ -1478,15 +2807,60 @@ def choose_ncbi_gui_settings(root, headers: list[str]) -> dict[str, object] | No
         if mode == "file" and not transcript_file_var.get().strip():
             messagebox.showerror("Missing transcript file", "Choose a transcript FASTA/text file.", parent=window)
             return
+        panel_accessions = [
+            value
+            for value in re.split(r"[,;\s]+", panel_accessions_var.get().strip())
+            if value
+        ]
+        if mode == "panel":
+            if not panel_accessions:
+                messagebox.showerror(
+                    "Missing panel accessions",
+                    "Enter one or more versioned RefSeq accessions.",
+                    parent=window,
+                )
+                return
+            try:
+                panel_accessions = [
+                    normalize_versioned_refseq_accession(value)
+                    for value in panel_accessions
+                ]
+            except ValueError as error:
+                messagebox.showerror("Invalid panel accession", str(error), parent=window)
+                return
+        if mode == "panel_table" and not target_table_var.get().strip():
+            messagebox.showerror(
+                "Missing target table",
+                "Choose a transcript accession table.",
+                parent=window,
+            )
+            return
+        if offline_var.get() and mode not in {"panel", "panel_table"}:
+            messagebox.showerror(
+                "Offline panel mode",
+                "Offline mode is available only for private transcript panels.",
+                parent=window,
+            )
+            return
 
         selected.update(
             {
+                "sequence_type": sequence_type_var.get(),
                 "as_column": as_column_var.get(),
                 "as_name_column": name_column_var.get() or None,
                 "target_mode": mode,
                 "target_accession_column": target_column_var.get() if mode == "column" else None,
-                "target_accession": refseq_var.get().strip() if mode == "refseq" else None,
+                "target_accession": (
+                    refseq_var.get().strip()
+                    if mode == "refseq"
+                    else panel_accessions if mode == "panel" else None
+                ),
                 "target_file": Path(transcript_file_var.get()) if mode == "file" else None,
+                "target_table": (
+                    Path(target_table_var.get()) if mode == "panel_table" else None
+                ),
+                "private_panel": mode in {"panel", "panel_table"},
+                "offline": offline_var.get(),
                 "scan_regions": scan_regions,
                 "max_mismatches": max_mismatches,
             }
@@ -1509,29 +2883,42 @@ def choose_ncbi_gui_settings(root, headers: list[str]) -> dict[str, object] | No
 
 
 def gui_args(input_file: Path, sheet_name: str | None, settings: dict[str, object]) -> argparse.Namespace:
-    output_path = default_gui_result_workbook(input_file)
+    sequence_type = normalize_sequence_type(str(settings.get("sequence_type", "AS")))
+    private_panel = bool(settings.get("private_panel", False))
+    output_path = (
+        input_file.with_name(f"{input_file.stem}_private_transcript_panel_results.xlsx")
+        if private_panel
+        else default_gui_result_workbook(input_file)
+    )
     return argparse.Namespace(
         as_sequence=None,
         as_name=None,
         as_file=None,
-        as_table=input_file,
-        as_column=settings["as_column"],
-        as_name_column=settings["as_name_column"],
-        as_sheet=sheet_name,
+        as_table=input_file if sequence_type == "AS" else None,
+        as_column=settings["as_column"] if sequence_type == "AS" else None,
+        as_name_column=settings["as_name_column"] if sequence_type == "AS" else None,
+        as_sheet=sheet_name if sequence_type == "AS" else None,
         ss_sequence=None,
         ss_name=None,
         ss_file=None,
-        ss_table=None,
-        ss_column=None,
-        ss_name_column=None,
-        ss_sheet=None,
+        ss_table=input_file if sequence_type == "SS" else None,
+        ss_column=settings["as_column"] if sequence_type == "SS" else None,
+        ss_name_column=settings["as_name_column"] if sequence_type == "SS" else None,
+        ss_sheet=sheet_name if sequence_type == "SS" else None,
         target_accession=settings["target_accession"],
         target_accession_column=settings["target_accession_column"],
         target_file=settings["target_file"],
         target_sequence=None,
+        target_table=settings.get("target_table"),
+        target_column=None,
+        target_sheet=None,
+        private_panel=private_panel,
+        offline=bool(settings.get("offline", False)),
+        refresh_targets=False,
+        download_targets_only=False,
         scan_region=settings["scan_regions"],
         max_mismatches=settings["max_mismatches"],
-        email=DEFAULT_EMAIL,
+        email=str(settings.get("email", "")),
         tool=DEFAULT_TOOL,
         blast=False,
         blast_only=False,
@@ -1547,10 +2934,13 @@ def gui_args(input_file: Path, sheet_name: str | None, settings: dict[str, objec
         filter_max_mismatches=DEFAULT_MAX_MISMATCHES,
         filter_max_gap_opens=0,
         filter_min_alignment_fraction=0.8,
-        cache_dir=input_file.with_name(f"{input_file.stem}_ncbi_cache"),
+        cache_dir=shared_gui_transcript_cache_dir(),
         rid_log=None,
         output=None,
         blast_output=None,
+        terminal=False,
+        stdout_csv=False,
+        closest=None,
         result_workbook=output_path,
         gui=False,
     )
@@ -1558,14 +2948,23 @@ def gui_args(input_file: Path, sheet_name: str | None, settings: dict[str, objec
 
 def run_gui() -> int:
     import tkinter as tk
-    from tkinter import filedialog, messagebox
+    from tkinter import filedialog, messagebox, ttk
 
     root = tk.Tk()
     root.withdraw()
 
     try:
+        ncbi_email = saved_or_prompted_ncbi_email(root)
+        if ncbi_email is None:
+            return 0
+        gui_mode, ncbi_email = choose_ncbi_gui_mode(root, ncbi_email)
+        if gui_mode is None:
+            return 0
+        if gui_mode == "single":
+            return run_single_sequence_gui(root, ncbi_email)
+
         input_path = filedialog.askopenfilename(
-            title="Select AS Excel input file",
+            title="Select local transcript scan Excel input file",
             filetypes=[
                 ("Excel files", "*.xlsx *.xlsm *.xls"),
                 ("All files", "*.*"),
@@ -1587,12 +2986,96 @@ def run_gui() -> int:
         settings = choose_ncbi_gui_settings(root, headers)
         if not settings:
             return 0
+        settings["email"] = ncbi_email
 
         args = gui_args(input_file, sheet_name, settings)
+        validate_runtime_args(args)
         started_at = datetime.now(timezone.utc).isoformat()
+        if private_panel_requested(args):
+            progress_window = tk.Toplevel(root)
+            progress_window.title("Private transcript panel")
+            progress_window.resizable(False, False)
+            status_var = tk.StringVar(value="Preparing transcript references...")
+            ttk.Label(progress_window, textvariable=status_var, width=64).grid(
+                row=0,
+                column=0,
+                padx=16,
+                pady=(16, 8),
+                sticky="w",
+            )
+            progress_bar = ttk.Progressbar(
+                progress_window,
+                mode="determinate",
+                length=440,
+            )
+            progress_bar.grid(row=1, column=0, padx=16, pady=8, sticky="ew")
+            cancelled = {"value": False}
+
+            def request_cancel() -> None:
+                cancelled["value"] = True
+                status_var.set("Cancelling after the current retrieval request...")
+
+            ttk.Button(
+                progress_window,
+                text="Cancel",
+                command=request_cancel,
+            ).grid(row=2, column=0, padx=16, pady=(8, 16), sticky="e")
+            progress_window.protocol("WM_DELETE_WINDOW", request_cancel)
+
+            def update_progress(
+                completed: int,
+                total: int,
+                accession: str,
+                status: str,
+            ) -> None:
+                progress_bar.configure(maximum=max(total, 1), value=completed)
+                status_var.set(
+                    f"{completed}/{total} targets - {accession}: {status}"
+                )
+                progress_window.update()
+
+            try:
+                exit_code = run_private_panel_workflow(
+                    args,
+                    started_at,
+                    progress_callback=update_progress,
+                    cancel_check=lambda: cancelled["value"],
+                    include_comparison_results=True,
+                )
+            finally:
+                progress_window.destroy()
+            if cancelled["value"]:
+                messagebox.showwarning(
+                    "Private transcript panel cancelled",
+                    "The partial status workbook was saved. Guide sequences "
+                    f"remained local.\n\n{args.result_workbook}",
+                )
+            elif exit_code == 0:
+                messagebox.showinfo(
+                    "Private transcript panel complete",
+                    "Guide sequences remained local.\n\n"
+                    f"Wrote panel workbook to:\n{args.result_workbook}",
+                )
+            elif exit_code == 2:
+                messagebox.showwarning(
+                    "Private transcript panel completed with target errors",
+                    "Some targets could not be scanned. Review comparison_results "
+                    f"and transcript_targets in:\n{args.result_workbook}",
+                )
+            else:
+                messagebox.showwarning(
+                    "Private transcript panel incomplete",
+                    "No target transcript was ready. Review the transcript_targets "
+                    f"sheet in:\n{args.result_workbook}",
+                )
+            return exit_code
         queries = args_antisense_queries(args)
         scan_regions = parse_scan_regions(args.scan_region)
-        local_matches = run_local_scan(args, queries, scan_regions)
+        local_matches, comparison_results = run_local_scan_with_comparison(
+            args,
+            queries,
+            scan_regions,
+        )
         completed_at = datetime.now(timezone.utc).isoformat()
         write_result_workbook(
             args.result_workbook,
@@ -1604,14 +3087,19 @@ def run_gui() -> int:
             started_at,
             completed_at,
             include_blast_sheets=False,
+            comparison_results=comparison_results,
         )
         messagebox.showinfo(
-            "Done",
-            f"Wrote NCBI transcript scan workbook to:\n{args.result_workbook}",
+            "Local transcript scan complete",
+            f"Wrote local transcript scan workbook to:\n{args.result_workbook}",
         )
         return 0
     except Exception as error:
-        messagebox.showerror("NCBI transcript scan failed", str(error))
+        logging.exception("Local transcript scan failed")
+        messagebox.showerror(
+            "Local transcript scan failed",
+            f"{error}\n\nDiagnostic log:\n{gui_log_path()}",
+        )
         return 1
     finally:
         root.destroy()
@@ -1652,7 +3140,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional SS/sense name/id column for --ss-table.",
     )
     parser.add_argument("--ss-sheet", help="Excel worksheet for --ss-table. Defaults to first sheet.")
-    parser.add_argument("--target-accession", help="NM/XM/NR/XR accession to fetch from NCBI.")
+    parser.add_argument(
+        "--target-accession",
+        action="append",
+        help=(
+            "Versioned NM/XM/NR/XR accession to fetch from NCBI. Repeat this "
+            "option to run a private local transcript-panel scan."
+        ),
+    )
     parser.add_argument(
         "--target-accession-column",
         help=(
@@ -1662,6 +3157,54 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--target-file", type=Path, help="FASTA/plain transcript file.")
     parser.add_argument("--target-sequence", help="Pasted FASTA/plain transcript sequence.")
+    parser.add_argument(
+        "--target-table",
+        type=Path,
+        help=(
+            "Text/CSV/Excel list of versioned RefSeq transcript accessions for "
+            "private local panel scanning."
+        ),
+    )
+    parser.add_argument(
+        "--target-column",
+        help="Accession column for --target-table. Defaults to target_accession/accession/refseq.",
+    )
+    parser.add_argument(
+        "--target-sheet",
+        help="Excel worksheet for --target-table. Defaults to the first sheet.",
+    )
+    parser.add_argument(
+        "--private-panel",
+        action="store_true",
+        help=(
+            "Scan every input guide against every requested transcript locally. "
+            "Guide sequences are never included in NCBI EFetch requests."
+        ),
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help=(
+            "Private panel mode only: do not contact NCBI and require every "
+            "target transcript to exist in --cache-dir."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-targets",
+        action="store_true",
+        help=(
+            "Private panel mode only: download and revalidate requested transcript "
+            "references even when exact versions already exist in --cache-dir."
+        ),
+    )
+    parser.add_argument(
+        "--download-targets-only",
+        action="store_true",
+        help=(
+            "Retrieve and verify private-panel transcript references without "
+            "reading or scanning guide sequences."
+        ),
+    )
     parser.add_argument(
         "--scan-region",
         action="append",
@@ -1680,20 +3223,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--email",
         default=DEFAULT_EMAIL,
         help=(
-            "Contact email for NCBI API usage guidelines. "
-            f"Defaults to {DEFAULT_EMAIL}."
+            "Contact email for NCBI API usage guidelines. Required whenever "
+            "a transcript or BLAST query must be submitted to NCBI."
         ),
     )
     parser.add_argument("--tool", default=DEFAULT_TOOL, help=f"NCBI tool name. Defaults to {DEFAULT_TOOL}.")
     parser.add_argument(
         "--blast",
         action="store_true",
-        help="Also run NCBI BLAST URL API against a nucleotide database.",
+        help=(
+            "Also submit the input oligo sequence(s) to the remote NCBI BLAST "
+            "URL API. This transmits query sequences outside the local computer."
+        ),
     )
     parser.add_argument(
         "--blast-only",
         action="store_true",
-        help="Run BLAST without requiring a specific target transcript.",
+        help=(
+            "Submit input oligo sequence(s) to remote NCBI BLAST without a "
+            "specific target transcript. This transmits query sequences outside "
+            "the local computer."
+        ),
     )
     parser.add_argument("--database", default=DEFAULT_DATABASE, help=f"BLAST database. Defaults to {DEFAULT_DATABASE}.")
     parser.add_argument("--expect", default=DEFAULT_EXPECT, help=f"BLAST expect value. Defaults to {DEFAULT_EXPECT}.")
@@ -1704,7 +3254,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_HITLIST_SIZE,
         help=f"Number of BLAST hits to retrieve. Defaults to {DEFAULT_HITLIST_SIZE}.",
     )
-    parser.add_argument("--megablast", action="store_true", help="Enable megablast for near-identical hits.")
+    parser.add_argument(
+        "--megablast",
+        action="store_true",
+        help=(
+            "Enable megablast for near-identical hits. When --word-size remains "
+            f"{DEFAULT_WORD_SIZE}, it is changed to {DEFAULT_MEGABLAST_WORD_SIZE}."
+        ),
+    )
     parser.add_argument(
         "--timeout-seconds",
         type=int,
@@ -1765,7 +3322,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--cache-dir",
         type=Path,
-        help="Optional folder for cached NCBI EFetch transcript FASTA files.",
+        help=(
+            "Optional folder for one-record NCBI EFetch transcript FASTA files. "
+            "Private panel mode defaults to '.ncbi_transcript_cache'."
+        ),
     )
     parser.add_argument(
         "--rid-log",
@@ -1794,7 +3354,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Print the N closest local transcript windows in terminal output, "
             "without applying --max-mismatches. In quick terminal mode, the tool "
             f"automatically shows the top {DEFAULT_CLOSEST_MATCHES} closest windows "
-            "when no matches pass --max-mismatches."
+            "when no matches pass --max-mismatches. Private panel mode writes "
+            "these to closest_transcript_windows."
         ),
     )
     parser.add_argument(
@@ -1802,17 +3363,78 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "Write an Excel workbook with input_queries, local scan, BLAST hits, "
-            "batch metadata, and run metadata. For --as-file/--as-table or "
-            "--ss-file/--ss-table, defaults "
-            "to '<input>_ncbi_blast_results.xlsx' when no CSV output is requested."
+            "transcript-panel status, batch metadata, and run metadata as "
+            "applicable. For --as-file/--as-table or --ss-file/--ss-table, defaults "
+            "to a workflow-specific '<input>_*_results.xlsx' name when no CSV "
+            "output is requested."
         ),
     )
     parser.add_argument(
         "--gui",
         action="store_true",
-        help="Choose AS Excel input and transcript target source with dialogs.",
+        help=(
+            "Choose an AS/SS Excel input and single-transcript or private-panel "
+            "target source with dialogs."
+        ),
     )
     return parser
+
+
+def validate_runtime_args(args: argparse.Namespace) -> None:
+    """Validate CLI/GUI settings before local work or network requests begin."""
+    if args.max_mismatches < 0:
+        raise ValueError("--max-mismatches must be 0 or greater.")
+    if args.filter_max_mismatches < 0:
+        raise ValueError("--filter-max-mismatches must be 0 or greater.")
+    if args.filter_max_gap_opens < 0:
+        raise ValueError("--filter-max-gap-opens must be 0 or greater.")
+    if not math.isfinite(args.filter_min_alignment_fraction) or not (
+        0 <= args.filter_min_alignment_fraction <= 1
+    ):
+        raise ValueError("--filter-min-alignment-fraction must be between 0 and 1.")
+    if args.hitlist_size < 1:
+        raise ValueError("--hitlist-size must be 1 or greater.")
+    if args.max_batch_bases < 1:
+        raise ValueError("--max-batch-bases must be 1 or greater.")
+    if args.timeout_seconds < 1:
+        raise ValueError("--timeout-seconds must be 1 or greater.")
+    if args.request_seconds < 0:
+        raise ValueError("--request-seconds must be 0 or greater.")
+    if args.poll_seconds < 0:
+        raise ValueError("--poll-seconds must be 0 or greater.")
+    if args.closest is not None and args.closest < 1:
+        raise ValueError("--closest must be 1 or greater.")
+    try:
+        expect = float(args.expect)
+    except (TypeError, ValueError) as error:
+        raise ValueError("--expect must be a number greater than 0.") from error
+    if not math.isfinite(expect) or expect <= 0:
+        raise ValueError("--expect must be a number greater than 0.")
+    if (args.blast or args.blast_only) and not clean_text_for_id(args.database):
+        raise ValueError("--database cannot be blank for remote BLAST.")
+    if getattr(args, "target_column", None) and not getattr(args, "target_table", None):
+        raise ValueError("--target-column requires --target-table.")
+    if getattr(args, "target_sheet", None) and not getattr(args, "target_table", None):
+        raise ValueError("--target-sheet requires --target-table.")
+    if getattr(args, "offline", False) and getattr(args, "refresh_targets", False):
+        raise ValueError("--offline cannot be combined with --refresh-targets.")
+    if private_panel_requested(args):
+        args.private_panel = True
+        if args.blast or args.blast_only:
+            raise ValueError(
+                "Private panel mode cannot be combined with --blast or --blast-only; "
+                "guide sequences must remain local."
+            )
+        if args.target_accession_column:
+            raise ValueError(
+                "Private panel mode cannot use the per-query --target-accession-column."
+            )
+        if args.target_file or args.target_sequence:
+            raise ValueError(
+                "Private panel mode uses versioned --target-accession values or "
+                "--target-table, not --target-file/--target-sequence."
+            )
+    args.word_size = resolve_blast_word_size(args.word_size, args.megablast)
 
 
 def args_antisense_queries(args: argparse.Namespace) -> list[AntisenseQuery]:
@@ -1845,11 +3467,24 @@ def run_local_scan(
         max_mismatches = args.max_mismatches
     matches = []
     shared_transcript: tuple[str, str] | None = None
+    if args.target_accession_column:
+        missing_accessions = [query.name for query in queries if not query.target_accession]
+        if missing_accessions:
+            names = ", ".join(missing_accessions)
+            raise ValueError(
+                "Missing target accession for query row(s): "
+                f"{names}. Fill --target-accession-column for every query."
+            )
     if not args.target_accession_column:
+        accessions = target_accession_values(args.target_accession)
+        if len(accessions) > 1:
+            raise ValueError(
+                "Multiple --target-accession values require private panel mode."
+            )
         shared_transcript = read_transcript_input(
             transcript_sequence=args.target_sequence,
             transcript_file=args.target_file,
-            accession=args.target_accession,
+            accession=accessions[0] if accessions else None,
             email=args.email,
             tool=args.tool,
             cache_dir=args.cache_dir,
@@ -1857,8 +3492,6 @@ def run_local_scan(
 
     for query in queries:
         if args.target_accession_column:
-            if not query.target_accession:
-                continue
             transcript_name, transcript = read_transcript_input(
                 accession=query.target_accession,
                 email=args.email,
@@ -1882,6 +3515,197 @@ def run_local_scan(
                 )
             )
     return matches
+
+
+def run_local_scan_with_comparison(
+    args: argparse.Namespace,
+    queries: list[AntisenseQuery],
+    scan_regions: list[AntisenseRegion],
+) -> tuple[list[TranscriptMatch], list[ComparisonResult]]:
+    """Run the GUI table scan and build one compact result per selected region."""
+    matches: list[TranscriptMatch] = []
+    comparison_results: list[ComparisonResult] = []
+    shared_transcript: tuple[str, str] | None = None
+    shared_target_label = ""
+
+    if args.target_accession_column:
+        missing_accessions = [query.name for query in queries if not query.target_accession]
+        if missing_accessions:
+            names = ", ".join(missing_accessions)
+            raise ValueError(
+                "Missing target accession for query row(s): "
+                f"{names}. Fill --target-accession-column for every query."
+            )
+    else:
+        accessions = target_accession_values(args.target_accession)
+        if len(accessions) > 1:
+            raise ValueError(
+                "Multiple --target-accession values require private panel mode."
+            )
+        shared_transcript = read_transcript_input(
+            transcript_sequence=args.target_sequence,
+            transcript_file=args.target_file,
+            accession=accessions[0] if accessions else None,
+            email=args.email,
+            tool=args.tool,
+            cache_dir=args.cache_dir,
+        )
+        shared_target_label = accessions[0] if accessions else shared_transcript[0]
+
+    for input_order, query in enumerate(queries, start=1):
+        if args.target_accession_column:
+            transcript_name, transcript = read_transcript_input(
+                accession=query.target_accession,
+                email=args.email,
+                tool=args.tool,
+                cache_dir=args.cache_dir,
+            )
+            target_label = query.target_accession
+        else:
+            assert shared_transcript is not None
+            transcript_name, transcript = shared_transcript
+            target_label = shared_target_label
+
+        for scan_region in scan_regions:
+            all_region_matches = scan_antisense_against_transcript(
+                query.sequence_5to3,
+                transcript,
+                transcript_name=transcript_name,
+                antisense_name=query.name,
+                scan_region=scan_region,
+                max_mismatches=None,
+                sequence_type=query.sequence_type,
+            )
+            passing_matches = [
+                match
+                for match in all_region_matches
+                if match.mismatches <= args.max_mismatches
+            ]
+            matches.extend(passing_matches)
+            comparison_results.append(
+                comparison_result_for_region(
+                    input_order=input_order,
+                    query=query,
+                    target_accession=target_label,
+                    scan_region=scan_region,
+                    passing_matches=passing_matches,
+                    all_matches=all_region_matches,
+                )
+            )
+
+    return matches, comparison_results
+
+
+def run_private_panel_scan(
+    queries: list[AntisenseQuery],
+    targets: list[TranscriptTargetResult],
+    scan_regions: list[AntisenseRegion],
+    max_mismatches: int,
+    closest: int | None = None,
+) -> PrivatePanelScanResult:
+    """Scan every private guide against every transcript target locally."""
+    matches: list[TranscriptMatch] = []
+    panel_closest_matches: list[TranscriptMatch] = []
+    summaries: list[QueryTargetSummary] = []
+    comparison_results: list[ComparisonResult] = []
+    region_names = ";".join(region.name for region in scan_regions)
+
+    for input_order, query in enumerate(queries, start=1):
+        sequence_type = normalize_sequence_type(query.sequence_type)
+        for target in targets:
+            if target.status != "ready":
+                for scan_region in scan_regions:
+                    comparison_results.append(
+                        comparison_result_for_region(
+                            input_order=input_order,
+                            query=query,
+                            target_accession=target.requested_accession,
+                            scan_region=scan_region,
+                            target_error=target.error,
+                        )
+                    )
+                summaries.append(
+                    QueryTargetSummary(
+                        query_name=query.name,
+                        sequence_type=sequence_type,
+                        requested_accession=target.requested_accession,
+                        retrieved_accession=target.retrieved_accession,
+                        target_status=target.status,
+                        scan_status="target_error",
+                        scan_regions=region_names,
+                        match_count=0,
+                        exact_match_count=0,
+                        best_mismatches=None,
+                        error=target.error,
+                    )
+                )
+                continue
+
+            pair_matches = []
+            pair_all_matches = []
+            for scan_region in scan_regions:
+                region_matches = scan_antisense_against_transcript(
+                    query.sequence_5to3,
+                    target.sequence_5to3,
+                    transcript_name=target.transcript_name or target.retrieved_accession,
+                    antisense_name=query.name,
+                    scan_region=scan_region,
+                    max_mismatches=None,
+                    sequence_type=sequence_type,
+                )
+                pair_all_matches.extend(region_matches)
+                passing_region_matches = [
+                    match
+                    for match in region_matches
+                    if match.mismatches <= max_mismatches
+                ]
+                pair_matches.extend(passing_region_matches)
+                comparison_results.append(
+                    comparison_result_for_region(
+                        input_order=input_order,
+                        query=query,
+                        target_accession=target.requested_accession,
+                        scan_region=scan_region,
+                        passing_matches=passing_region_matches,
+                        all_matches=region_matches,
+                    )
+                )
+                if closest is not None:
+                    panel_closest_matches.extend(
+                        closest_transcript_matches(region_matches, closest)
+                    )
+            matches.extend(pair_matches)
+            summaries.append(
+                QueryTargetSummary(
+                    query_name=query.name,
+                    sequence_type=sequence_type,
+                    requested_accession=target.requested_accession,
+                    retrieved_accession=target.retrieved_accession,
+                    target_status=target.status,
+                    scan_status="matched" if pair_matches else "no_match",
+                    scan_regions=region_names,
+                    match_count=len(pair_matches),
+                    exact_match_count=sum(match.mismatches == 0 for match in pair_matches),
+                    best_mismatches=(
+                        min(
+                            match.mismatches
+                            for match in (
+                                pair_all_matches if closest is not None else pair_matches
+                            )
+                        )
+                        if (pair_all_matches if closest is not None else pair_matches)
+                        else None
+                    ),
+                )
+            )
+
+    return PrivatePanelScanResult(
+        targets=tuple(targets),
+        matches=tuple(matches),
+        summaries=tuple(summaries),
+        closest_matches=tuple(panel_closest_matches),
+        comparison_results=tuple(comparison_results),
+    )
 
 
 def combine_blast_csv(outputs: Iterable[BlastBatchResult]) -> str:
@@ -1928,6 +3752,12 @@ def run_blast_batches(
     args: argparse.Namespace,
     queries: list[AntisenseQuery],
 ) -> list[BlastBatchResult]:
+    queries = assign_unique_blast_query_ids(queries)
+    print(
+        "Privacy warning: remote NCBI BLAST will transmit "
+        f"{len(queries)} oligo sequence(s) outside this computer.",
+        file=sys.stderr,
+    )
     client = NcbiBlastClient(
         email=require_email(args.email),
         tool=args.tool,
@@ -1974,6 +3804,104 @@ def run_blast_batches(
     return outputs
 
 
+def run_private_panel_workflow(
+    args: argparse.Namespace,
+    started_at: str,
+    *,
+    progress_callback: Callable[[int, int, str, str], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+    include_comparison_results: bool = False,
+) -> int:
+    """Retrieve public references and scan private guides entirely locally."""
+    accessions = panel_accessions_from_args(args)
+    cache_dir = private_panel_cache_dir(args)
+    print(
+        "Private local panel mode: guide sequences remain on this computer; "
+        "NCBI EFetch requests contain transcript accessions only.",
+        file=sys.stderr,
+    )
+    targets = retrieve_transcript_targets(
+        accessions,
+        email=args.email,
+        tool=args.tool,
+        cache_dir=cache_dir,
+        offline=args.offline,
+        refresh=bool(getattr(args, "refresh_targets", False)),
+        request_seconds=args.request_seconds,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+    )
+
+    queries: list[AntisenseQuery] = []
+    scan_regions = parse_scan_regions(args.scan_region)
+    if args.download_targets_only:
+        panel_result = PrivatePanelScanResult(
+            targets=tuple(targets),
+            matches=(),
+            summaries=(),
+        )
+    else:
+        queries = args_antisense_queries(args)
+        panel_result = run_private_panel_scan(
+            queries,
+            targets,
+            scan_regions,
+            args.max_mismatches,
+            closest=args.closest,
+        )
+
+    local_matches = list(panel_result.matches)
+    if args.output:
+        write_text(args.output, transcript_matches_to_csv(local_matches))
+        print(f"Wrote private local panel matches to: {args.output}")
+    if args.stdout_csv:
+        print(transcript_matches_to_csv(local_matches), end="")
+
+    result_workbook = default_private_panel_workbook(args)
+    completed_at = datetime.now(timezone.utc).isoformat()
+    write_result_workbook(
+        result_workbook,
+        args,
+        queries,
+        scan_regions,
+        local_matches,
+        [],
+        started_at,
+        completed_at,
+        include_blast_sheets=False,
+        comparison_results=(
+            list(panel_result.comparison_results)
+            if include_comparison_results and not args.download_targets_only
+            else None
+        ),
+        transcript_targets=list(panel_result.targets),
+        query_target_summaries=(
+            None
+            if args.download_targets_only or include_comparison_results
+            else list(panel_result.summaries)
+        ),
+        closest_local_matches=(
+            list(panel_result.closest_matches) if args.closest is not None else None
+        ),
+    )
+
+    ready_count = sum(target.status == "ready" for target in panel_result.targets)
+    error_count = len(panel_result.targets) - ready_count
+    print(
+        f"Private panel targets: {ready_count} ready, {error_count} error; "
+        f"queries: {len(queries)}; local matches: {len(local_matches)}"
+    )
+    print(f"Wrote private transcript panel workbook to: {result_workbook}")
+    if error_count:
+        print(
+            "One or more target references could not be used; see transcript_targets.",
+            file=sys.stderr,
+        )
+    if not ready_count:
+        return 1
+    return 2 if error_count else 0
+
+
 def main() -> int:
     args = build_parser().parse_args()
     if args.gui:
@@ -1981,6 +3909,9 @@ def main() -> int:
 
     started_at = datetime.now(timezone.utc).isoformat()
     try:
+        validate_runtime_args(args)
+        if private_panel_requested(args):
+            return run_private_panel_workflow(args, started_at)
         queries = args_antisense_queries(args)
         if (
             not args.blast_only
@@ -1998,8 +3929,6 @@ def main() -> int:
         if args.blast_only:
             args.blast = True
         if not args.blast_only:
-            if args.closest is not None and args.closest < 1:
-                raise ValueError("--closest must be 1 or greater.")
             result_workbook = default_result_workbook(args)
             quick_terminal_default = (
                 (args.as_sequence or args.ss_sequence)
@@ -2079,8 +4008,10 @@ def main() -> int:
                 blast_outputs,
                 started_at,
                 completed_at,
+                include_blast_sheets=args.blast,
             )
-            print(f"Wrote NCBI oligo result workbook to: {result_workbook}")
+            workflow_label = "NCBI BLAST" if args.blast else "local transcript scan"
+            print(f"Wrote {workflow_label} result workbook to: {result_workbook}")
 
         return 0
     except (ValueError, TimeoutError) as error:

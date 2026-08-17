@@ -3,4 +3,15 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.ncbi_transcript_cache/
+/TranscriptScanData/
+/build/
+/dist/
 outputs/verification/
+/Logseq_markdown/
+/.codex_tmp/
+
+# Generated run artifacts; keep repository plot examples visible.
+/outputs/*
+!/outputs/plots/
+!/outputs/plots/**

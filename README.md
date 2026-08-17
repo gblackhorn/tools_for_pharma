@@ -14,6 +14,56 @@ outputs/plots/  Generated plot examples
 tests/fixtures/ Test data, when tests are added
 ```
 
+## Logseq Summary Export
+
+Keep the local Logseq Markdown mirror under `Logseq_markdown`, with source notes
+in its `journals` and `pages` subfolders. These source files are the editable
+source of truth; do not manually maintain the generated summary documents.
+
+After refreshing the mirror, first perform a read-only comparison:
+
+```powershell
+python -m tools_for_pharma.logseq_export --source Logseq_markdown --check
+```
+
+The check lists source paths that were added, modified, deleted, or changed
+between ID-only and substantive content. It does not print note contents. Exit
+status `0` means both exports are current, while status `1` means an update is
+needed.
+
+Update only the stale journal or page export with:
+
+```powershell
+python -m tools_for_pharma.logseq_export --source Logseq_markdown --update
+```
+
+Omitting `--update` retains the original update behavior. Each affected summary
+is regenerated completely and replaced atomically in `Logseq_markdown/export`:
+
+- `Logseq_journals_for_summary.md`
+- `Logseq_pages_for_summary.md`
+
+The exporter removes Logseq `id::` UUID properties, removes SharePoint and
+OneDrive destinations, masks standalone DNA/RNA strings of at least 10 bases,
+preserves source boundaries, and lists ID-only files in an appendix. Re-run
+`--check` after updating to verify that both summaries are synchronized.
+
+## MSH3 Transcript Panel Comparison
+
+Download the requested versioned Ensembl MSH3 mature cDNAs and compare each one
+against the exact RefSeq reference `NM_002439.5`:
+
+```powershell
+python -m tools_for_pharma.oligo.transcript_panel --output-dir outputs\msh3_transcript_comparison
+```
+
+The output directory contains separate cDNA and CDS FASTA files, one combined
+multi-record cDNA FASTA, a retrieval manifest, a reference-anchored comparison
+summary, difference blocks, conserved coordinate blocks, and JSON data for a
+review workbook. The command stops instead of silently substituting a newer
+Ensembl transcript version when an exact requested version is not available
+from the live Ensembl release.
+
 The batch files stay in the repo root so they remain easy to double-click. Each
 launcher changes into the repo root and runs the matching Python module with
 `python -m ...`.
@@ -92,16 +142,73 @@ For AS oligo checks against a specific transcript, provide the AS sequence and
 an NM/XM/NR/XR accession. The tool fetches the transcript through NCBI EFetch and
 scans for the AS reverse-complement target.
 
-Use the GUI for an Excel AS table:
+Open the private local transcript-scan GUI:
 
 ```text
-run_ncbi_blast_gui.bat
+run_ncbi_transcript_scan_gui.bat
 ```
 
-The GUI lets you choose the input workbook, AS sequence/name columns, and the
-transcript source: use a `target_accession` column, type one RefSeq accession for
-all rows, or choose a local transcript FASTA/text file. Results are saved beside
-the input workbook as `<input filename>_ncbi_blast_results.xlsx`.
+`run_ncbi_blast_gui.bat` remains as a legacy alias, but this GUI performs a
+local transcript scan and does not submit oligo sequences to BLAST.
+
+The GUI asks for the user's NCBI contact email on first use and saves it only on
+that computer. The opening screen allows the saved email to be changed later.
+
+The first dialog offers two workflows. **Single sequence and one transcript**
+accepts one AS or SS sequence, one exact-version RefSeq accession such as
+`NM_002439.5`, and these scan-region presets:
+
+- Full sequence (selected by default)
+- Seed, positions 2-8
+- Core, positions 2-18
+
+The single-sequence workflow shows five closest transcript windows per selected
+region by default. These windows are not filtered by the maximum-mismatch
+setting, and different region lengths are ranked separately. Results appear
+directly in a scrollable text window with **Copy all** and **New scan** buttons;
+this workflow does not create an Excel workbook.
+
+**Excel sequence table** retains the batch workflow. It lets you choose AS or SS
+sequence/name columns and a transcript source: a `target_accession` column, one
+RefSeq accession for all rows, a local transcript FASTA/text file, or a private
+versioned-accession panel. Single-target results are saved beside the input as
+`<input filename>_ncbi_transcript_scan_results.xlsx`; panel results use
+`<input filename>_private_transcript_panel_results.xlsx`.
+
+Excel-table GUI workbooks begin with `input_queries`, then the compact
+`comparison_results` sheet, followed by the unchanged `local_transcript_scan`
+technical-detail sheet. `comparison_results` contains one best summary for each
+query, target, and selected region, including the region start/end, result
+status, qualifying-site count, best transcript coordinates, the two sequences
+in query orientation, and human-readable differences. Mismatch positions are
+1-based coordinates in the complete entered sequence: for example, the first
+base of `seed:2-8` is reported as position `2`, not position `1`. A query with no
+qualifying match remains in the summary with its closest transcript window.
+
+GUI workflows share `TranscriptScanData\transcript_cache` beside the source or
+packaged app. Each exact accession version is downloaded once and reused on
+later runs. Single-sequence mode automatically downloads the transcript when it
+is not already cached and can explicitly refresh it when requested. Cache-only
+offline mode remains available for Excel private-panel scans. The cache contains
+public transcript FASTA records only; oligo sequences remain local and are not
+written into the cache. `TranscriptScanData\settings.json` stores the contact
+email, and `TranscriptScanData\logs` contains rotating diagnostic logs.
+
+#### Build a portable Windows app
+
+The one-folder distribution includes Python and the required libraries, so the
+recipient does not need to install Python. Build it on 64-bit Windows from the
+repository root:
+
+```powershell
+python -m pip install -r deployment\requirements-transcript-scan.txt
+powershell -NoProfile -ExecutionPolicy Bypass -File deployment\build_transcript_scan.ps1
+```
+
+Share the complete `dist\TranscriptScan` folder, or ZIP that folder without
+moving `TranscriptScan.exe` out of it. The app creates its writable
+`TranscriptScanData` subfolder on first use. Build and end-user instructions are
+in `deployment\README_TRANSCRIPT_SCAN.txt`.
 
 ```powershell
 python -m tools_for_pharma.oligo.ncbi_blast --as-sequence "AUGCUACGGAUCUAGCUAGCU" --target-accession NM_000000.0
@@ -132,6 +239,9 @@ You can also compare against a local FASTA/plain transcript:
 python -m tools_for_pharma.oligo.ncbi_blast --as-sequence "AUGCUACGGAUCUAGCUAGCU" --target-file transcript.fasta --max-mismatches 3
 ```
 
+The local scanner accepts exactly one transcript record per target file. It
+rejects multi-record FASTA files instead of concatenating their records.
+
 The local scan output includes both the transcript window in transcript
 orientation and `transcript_match_as_5to3`, which is reverse-complemented back to
 AS orientation so it can be compared directly with your AS sequence. If you want
@@ -152,7 +262,38 @@ For oligo risk review, you can scan full AS plus custom subregions:
 python -m tools_for_pharma.oligo.ncbi_blast --as-table as_sequences.xlsx --as-column antisense --as-name-column oligo_id --target-file transcript.fasta --scan-region full --scan-region seed:2-8 --scan-region core:2-18 --result-workbook as_review.xlsx
 ```
 
+For a privacy-preserving local panel scan, repeat an exact-version RefSeq
+accession. NCBI EFetch receives only these public accessions; guide sequences
+remain on the local computer:
+
+```powershell
+$guide = Read-Host "Enter AS sequence"
+python -m tools_for_pharma.oligo.ncbi_blast --as-sequence $guide --private-panel --target-accession NM_000041.4 --target-accession NM_001302688.2 --cache-dir .ncbi_transcript_cache --max-mismatches 0
+```
+
+Targets can also come from a text, CSV, or Excel table. The default accession
+column names are `target_accession`, `accession`, or `refseq`:
+
+```powershell
+python -m tools_for_pharma.oligo.ncbi_blast --as-table guides.xlsx --as-column antisense --as-name-column oligo_id --private-panel --target-table transcript_targets.xlsx --target-column target_accession --result-workbook private_panel_results.xlsx
+```
+
+Use `--download-targets-only` to retrieve and validate the public references
+before entering any guide. After the one-record FASTA files are cached, add
+`--offline` to prohibit all NCBI requests during scanning. Private panel
+CLI private-panel workbooks contain `input_queries`, `transcript_targets`,
+`local_transcript_scan`, `query_target_summary`, and `run_metadata`. The GUI
+uses its compact `comparison_results` sheet instead of the redundant
+`query_target_summary`. Every guide-target pair receives a match, no-match, or
+target-error result.
+
+The transcript-scan GUI also supports AS or SS tables, private accession panels,
+target tables, and offline cache-only scanning.
+
 For broader NCBI BLAST URL API searches, use `--blast` or `--blast-only`:
+
+**Privacy warning:** these options transmit the input oligo sequence(s) to the
+remote NCBI BLAST service. Local transcript scans do not transmit the oligo.
 
 ```powershell
 python -m tools_for_pharma.oligo.ncbi_blast --as-sequence "AUGCUACGGAUCUAGCUAGCU" --blast-only --database refseq_rna --blast-output blast_hits.csv
@@ -179,17 +320,19 @@ For batch work, the preferred output is an Excel result workbook:
 python -m tools_for_pharma.oligo.ncbi_blast --as-table as_sequences.xlsx --as-column antisense --as-name-column oligo_id --blast-only --database refseq_rna --result-workbook as_blast_results.xlsx
 ```
 
-The workbook contains `input_queries`, `local_transcript_scan`,
+Remote BLAST workbooks contain `input_queries`, `local_transcript_scan`,
 `blast_hits_raw`, `blast_hits_filtered`, `blast_batches`, and `run_metadata`.
-If you use `--as-file` or `--as-table` without CSV output paths, the tool writes
-`<input>_ncbi_blast_results.xlsx` by default. Use `--cache-dir` to reuse fetched
-NM/XM transcript FASTA files across runs.
+Local-only workbooks omit the BLAST sheets. Without explicit CSV or workbook
+paths, local scans write `<input>_ncbi_transcript_scan_results.xlsx` and remote
+BLAST runs write `<input>_ncbi_blast_results.xlsx`. Use `--cache-dir` to reuse
+fetched NM/XM transcript FASTA files across runs.
 
 NCBI asks API users to include `tool` and `email`, avoid contacting BLAST more
 than once every 10 seconds, and avoid polling a single RID more than once per
 minute. The tool uses safer defaults: at least 15 seconds between NCBI requests
-and at least 75 seconds between status checks for the same RID. The default
-contact email is `da.guo@argobiopharma.com`; pass `--email` to override it.
+and at least 75 seconds between status checks for the same RID. The GUI asks for
+and locally saves the current user's email. CLI commands that need NCBI network
+access require `--email user@example.com`; cached/offline local scans do not.
 
 ## qPCR Table Extraction And Plotting
 

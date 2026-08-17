@@ -1,0 +1,13 @@
+Transcript Scan bundles the Python interpreter and third-party components,
+including PyInstaller, pandas, NumPy, openpyxl, python-dateutil, tzdata, and
+et-xmlfile. Their respective licenses and notices remain applicable.
+
+Project and license information:
+- Python: https://www.python.org/psf/license/
+- PyInstaller: https://pyinstaller.org/en/stable/license.html
+- pandas: https://pandas.pydata.org/about/citing.html
+- NumPy: https://numpy.org/doc/stable/license.html
+- openpyxl: https://foss.heptapod.net/openpyxl/openpyxl/-/blob/branch/3.1/LICENCE.rst
+- python-dateutil: https://github.com/dateutil/dateutil/blob/master/LICENSE
+- tzdata: https://github.com/python/tzdata/blob/master/LICENSE
+- et-xmlfile: https://foss.heptapod.net/openpyxl/et_xmlfile/-/blob/branch/default/LICENCE.rst

@@ -9,6 +9,12 @@ import sys
 
 import pandas as pd
 
+from tools_for_pharma.plotting.style import (
+    DEFAULT_THEME,
+    apply_main_axis_style,
+    get_pyplot,
+    save_figure_pair,
+)
 from tools_for_pharma.qpcr.common import (
     MEAN_CT_COLUMN,
     REFERENCE_GENE_COLUMN,
@@ -32,29 +38,22 @@ REQUIRED_COLUMNS = [
     SEM_COLUMN,
 ]
 
-FONT_FAMILY = "Arial"
-FONT_SIZE = 11
-TITLE_FONT_SIZE = 14
-AXIS_LABEL_FONT_SIZE = 13
-TICK_LABEL_FONT_SIZE = 11
-LEGEND_FONT_SIZE = 11
-FIGURE_HEIGHT = 7.2
-LAYOUT_TOP = 0.84
+FONT_FAMILY = DEFAULT_THEME.font_family
+FONT_SIZE = DEFAULT_THEME.body_font_size
+TITLE_FONT_SIZE = DEFAULT_THEME.title_font_size
+AXIS_LABEL_FONT_SIZE = DEFAULT_THEME.axis_label_font_size
+TICK_LABEL_FONT_SIZE = DEFAULT_THEME.tick_font_size
+LEGEND_FONT_SIZE = DEFAULT_THEME.legend_font_size
+FIGURE_HEIGHT = 10.5
+LAYOUT_TOP = 0.77
 LEGEND_TOP = 0.91
 MAX_LEGEND_COLUMNS = 4
 
-TEXT_COLOR = "#222222"
-AXIS_COLOR = "#444444"
-GRID_COLOR = "#D9D9D9"
+TEXT_COLOR = DEFAULT_THEME.text_color
+AXIS_COLOR = DEFAULT_THEME.axis_color
+GRID_COLOR = DEFAULT_THEME.grid_color
 ERROR_BAR_COLOR = "#2A2A2A"
-REFERENCE_PALETTE = [
-    "#4E79A7",
-    "#59A14F",
-    "#F28E2B",
-    "#B07AA1",
-    "#E15759",
-    "#76B7B2",
-]
+REFERENCE_PALETTE = DEFAULT_THEME.palette
 
 
 def group_label(row: pd.Series) -> str:
@@ -118,37 +117,7 @@ def read_refqc_summary(input_file: Path, sheet_name: str | None = None) -> pd.Da
     return summary
 
 
-def get_pyplot():
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    plt.rcParams.update(
-        {
-            "font.family": "sans-serif",
-            "font.sans-serif": [FONT_FAMILY, "DejaVu Sans", "Calibri", "Arial"],
-            "font.size": FONT_SIZE,
-            "axes.titlesize": TITLE_FONT_SIZE,
-            "axes.labelsize": AXIS_LABEL_FONT_SIZE,
-            "axes.titleweight": "bold",
-            "axes.edgecolor": AXIS_COLOR,
-            "axes.labelcolor": TEXT_COLOR,
-            "xtick.color": TEXT_COLOR,
-            "ytick.color": TEXT_COLOR,
-            "legend.fontsize": LEGEND_FONT_SIZE,
-            "figure.facecolor": "white",
-            "axes.facecolor": "white",
-            "savefig.facecolor": "white",
-        }
-    )
-    return plt
-
-
 def finish_plot(axis, title: str, labels: list[str], output_path: Path) -> list[Path]:
-    plt = get_pyplot()
-    png_path = output_path.with_suffix(".png")
-    svg_path = output_path.with_suffix(".svg")
     axis.figure.suptitle(
         title,
         y=0.99,
@@ -157,7 +126,11 @@ def finish_plot(axis, title: str, labels: list[str], output_path: Path) -> list[
         fontweight="bold",
     )
     axis.set_ylabel(MEAN_CT_COLUMN)
-    axis.yaxis.grid(True, color=GRID_COLOR, linewidth=0.7)
+    axis.yaxis.grid(
+        True,
+        color=GRID_COLOR,
+        linewidth=DEFAULT_THEME.primary_grid_line_width,
+    )
     axis.set_axisbelow(True)
     axis.set_xticks(range(len(labels)))
     axis.set_xticklabels(
@@ -166,18 +139,10 @@ def finish_plot(axis, title: str, labels: list[str], output_path: Path) -> list[
         ha="center",
         fontsize=TICK_LABEL_FONT_SIZE,
     )
-    axis.tick_params(axis="both", length=3, width=0.8)
+    apply_main_axis_style(axis)
     axis.margins(x=0.02)
-    axis.spines["top"].set_visible(False)
-    axis.spines["right"].set_visible(False)
-    axis.spines["left"].set_linewidth(0.8)
-    axis.spines["bottom"].set_linewidth(0.8)
     axis.figure.tight_layout(rect=(0, 0, 1, LAYOUT_TOP))
-    png_path.parent.mkdir(parents=True, exist_ok=True)
-    axis.figure.savefig(png_path, dpi=300, bbox_inches="tight")
-    axis.figure.savefig(svg_path, bbox_inches="tight")
-    plt.close(axis.figure)
-    return [png_path, svg_path]
+    return save_figure_pair(axis.figure, output_path)
 
 
 def plot_reference_mean_ct(summary: pd.DataFrame, plot_dir: Path) -> list[Path]:
@@ -187,7 +152,7 @@ def plot_reference_mean_ct(summary: pd.DataFrame, plot_dir: Path) -> list[Path]:
     if not labels or not reference_genes:
         return []
 
-    figure_width = max(12, len(labels) * 0.56)
+    figure_width = max(13, len(labels) * 0.72)
     figure, axis = plt.subplots(figsize=(figure_width, FIGURE_HEIGHT))
     offset_step = min(0.18, 0.8 / max(len(reference_genes), 1))
     first_offset = -offset_step * (len(reference_genes) - 1) / 2

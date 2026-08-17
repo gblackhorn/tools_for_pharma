@@ -13,6 +13,12 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from tools_for_pharma.plotting.style import (
+    DEFAULT_THEME,
+    apply_main_axis_style,
+    get_pyplot,
+    save_figure_pair,
+)
 from tools_for_pharma.shared.excel_utils import list_excel_sheets
 from tools_for_pharma.shared.text_utils import clean_text, sanitize_filename
 
@@ -37,27 +43,20 @@ MEAN_ERROR_PATTERN = re.compile(
     rf"(?P<error>{NUMBER_PATTERN})\s*$"
 )
 
-FONT_FAMILY = "Arial"
-FONT_SIZE = 11
-TITLE_FONT_SIZE = 14
-AXIS_LABEL_FONT_SIZE = 13
-TICK_LABEL_FONT_SIZE = 11
-LEGEND_FONT_SIZE = 11
-FIGURE_HEIGHT = 6.5
-FIGURE_WIDTH = 10.8
-SUMMARY_FIGURE_WIDTH = 13.2
-GRID_COLOR = "#D9D9D9"
-TEXT_COLOR = "#222222"
-AXIS_COLOR = "#444444"
+FONT_FAMILY = DEFAULT_THEME.font_family
+FONT_SIZE = DEFAULT_THEME.body_font_size
+TITLE_FONT_SIZE = DEFAULT_THEME.title_font_size
+AXIS_LABEL_FONT_SIZE = DEFAULT_THEME.axis_label_font_size
+TICK_LABEL_FONT_SIZE = DEFAULT_THEME.tick_font_size
+LEGEND_FONT_SIZE = DEFAULT_THEME.legend_font_size
+FIGURE_HEIGHT = 10.5
+FIGURE_WIDTH = 15.0
+SUMMARY_FIGURE_WIDTH = 19.0
+GRID_COLOR = DEFAULT_THEME.grid_color
+TEXT_COLOR = DEFAULT_THEME.text_color
+AXIS_COLOR = DEFAULT_THEME.axis_color
 MARKER_COLOR = "#404040"
-CURVE_PALETTE = [
-    "#4E79A7",
-    "#59A14F",
-    "#F28E2B",
-    "#B07AA1",
-    "#E15759",
-    "#76B7B2",
-]
+CURVE_PALETTE = DEFAULT_THEME.palette
 
 
 @dataclass(frozen=True)
@@ -99,33 +98,6 @@ class CurveFit:
     hill_slope: float | None = None
     r_squared: float | None = None
     fallback_reason: str | None = None
-
-
-def get_pyplot():
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    plt.rcParams.update(
-        {
-            "font.family": "sans-serif",
-            "font.sans-serif": [FONT_FAMILY, "DejaVu Sans", "Calibri", "Arial"],
-            "font.size": FONT_SIZE,
-            "axes.titlesize": TITLE_FONT_SIZE,
-            "axes.labelsize": AXIS_LABEL_FONT_SIZE,
-            "axes.titleweight": "bold",
-            "axes.edgecolor": AXIS_COLOR,
-            "axes.labelcolor": TEXT_COLOR,
-            "xtick.color": TEXT_COLOR,
-            "ytick.color": TEXT_COLOR,
-            "legend.fontsize": LEGEND_FONT_SIZE,
-            "figure.facecolor": "white",
-            "axes.facecolor": "white",
-            "savefig.facecolor": "white",
-        }
-    )
-    return plt
 
 
 def default_plot_dir(input_file: Path) -> Path:
@@ -751,14 +723,7 @@ def calculate_curve_descriptor(
 
 
 def save_plot(axis, output_path: Path) -> list[Path]:
-    plt = get_pyplot()
-    png_path = output_path.with_suffix(".png")
-    svg_path = output_path.with_suffix(".svg")
-    png_path.parent.mkdir(parents=True, exist_ok=True)
-    axis.figure.savefig(png_path, dpi=300, bbox_inches="tight")
-    axis.figure.savefig(svg_path, bbox_inches="tight")
-    plt.close(axis.figure)
-    return [png_path, svg_path]
+    return save_figure_pair(axis.figure, output_path)
 
 
 def plot_curve_summary(
@@ -864,7 +829,7 @@ def plot_curve_summary(
                 xytext=(6, 8 + marker_index % 3 * 10),
                 textcoords="offset points",
                 color=color,
-                fontsize=9,
+                fontsize=DEFAULT_THEME.annotation_font_size,
             )
 
     if log_x:
@@ -872,14 +837,19 @@ def plot_curve_summary(
     axis.set_title(title, pad=12, color=TEXT_COLOR)
     axis.set_xlabel(x_label or x_column)
     axis.set_ylabel(y_label or y_column)
-    axis.yaxis.grid(True, color=GRID_COLOR, linewidth=0.7)
-    axis.xaxis.grid(True, color=GRID_COLOR, linewidth=0.45, alpha=0.6)
+    axis.yaxis.grid(
+        True,
+        color=GRID_COLOR,
+        linewidth=DEFAULT_THEME.primary_grid_line_width,
+    )
+    axis.xaxis.grid(
+        True,
+        color=GRID_COLOR,
+        linewidth=DEFAULT_THEME.secondary_grid_line_width,
+        alpha=DEFAULT_THEME.secondary_grid_alpha,
+    )
     axis.set_axisbelow(True)
-    axis.tick_params(axis="both", labelsize=TICK_LABEL_FONT_SIZE, length=3, width=0.8)
-    axis.spines["top"].set_visible(False)
-    axis.spines["right"].set_visible(False)
-    axis.spines["left"].set_linewidth(0.8)
-    axis.spines["bottom"].set_linewidth(0.8)
+    apply_main_axis_style(axis)
     if series_column:
         axis.legend(frameon=False, loc="best")
     if summary_renderer is not None:

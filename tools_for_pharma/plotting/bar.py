@@ -11,6 +11,12 @@ import pandas as pd
 
 from tools_for_pharma.shared.excel_utils import list_excel_sheets
 from tools_for_pharma.shared.text_utils import clean_text, sanitize_filename
+from tools_for_pharma.plotting.style import (
+    DEFAULT_THEME,
+    apply_main_axis_style,
+    get_pyplot,
+    save_figure_pair,
+)
 
 
 INPUT_FILE = Path("group_plot.xlsx")
@@ -27,63 +33,29 @@ PLOT_MODE_CHOICES = [
     PLOT_MODE_LEGACY,
 ]
 
-FONT_FAMILY = "Arial"
-FONT_SIZE = 11
-TITLE_FONT_SIZE = 14
-AXIS_LABEL_FONT_SIZE = 13
-TICK_LABEL_FONT_SIZE = 11
-LEGEND_FONT_SIZE = 11
-FIGURE_HEIGHT = 6.5
-LAYOUT_TOP = 0.86
+FONT_FAMILY = DEFAULT_THEME.font_family
+FONT_SIZE = DEFAULT_THEME.body_font_size
+TITLE_FONT_SIZE = DEFAULT_THEME.title_font_size
+AXIS_LABEL_FONT_SIZE = DEFAULT_THEME.axis_label_font_size
+TICK_LABEL_FONT_SIZE = DEFAULT_THEME.tick_font_size
+LEGEND_FONT_SIZE = DEFAULT_THEME.legend_font_size
+FIGURE_HEIGHT = 10.5
+LAYOUT_TOP = 0.77
 LEGEND_TOP = 0.93
 MAX_LEGEND_COLUMNS = 5
 
-TEXT_COLOR = "#222222"
-AXIS_COLOR = "#444444"
-GRID_COLOR = "#D9D9D9"
+TEXT_COLOR = DEFAULT_THEME.text_color
+AXIS_COLOR = DEFAULT_THEME.axis_color
+GRID_COLOR = DEFAULT_THEME.grid_color
 BAR_EDGE_COLOR = "#303030"
 ERROR_BAR_COLOR = "#2A2A2A"
-BAR_PALETTE = [
-    "#4E79A7",
-    "#59A14F",
-    "#F28E2B",
-    "#B07AA1",
-    "#E15759",
-    "#76B7B2",
-]
+BAR_PALETTE = DEFAULT_THEME.palette
 
 NUMBER_PATTERN = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 MEAN_SEM_PATTERN = re.compile(
     rf"^\s*(?P<mean>{NUMBER_PATTERN})\s*(?:\u00b1|\+/-|\+-)\s*"
     rf"(?P<sem>{NUMBER_PATTERN})\s*$"
 )
-
-
-def get_pyplot():
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    plt.rcParams.update(
-        {
-            "font.family": "sans-serif",
-            "font.sans-serif": [FONT_FAMILY, "DejaVu Sans", "Calibri", "Arial"],
-            "font.size": FONT_SIZE,
-            "axes.titlesize": TITLE_FONT_SIZE,
-            "axes.labelsize": AXIS_LABEL_FONT_SIZE,
-            "axes.titleweight": "bold",
-            "axes.edgecolor": AXIS_COLOR,
-            "axes.labelcolor": TEXT_COLOR,
-            "xtick.color": TEXT_COLOR,
-            "ytick.color": TEXT_COLOR,
-            "legend.fontsize": LEGEND_FONT_SIZE,
-            "figure.facecolor": "white",
-            "axes.facecolor": "white",
-            "savefig.facecolor": "white",
-        }
-    )
-    return plt
 
 
 def default_plot_dir(input_file: Path) -> Path:
@@ -314,9 +286,6 @@ def prepare_wide_time_data(
 
 
 def finish_plot(axis, title: str, y_label: str, output_path: Path) -> list[Path]:
-    plt = get_pyplot()
-    png_path = output_path.with_suffix(".png")
-    svg_path = output_path.with_suffix(".svg")
     axis.figure.suptitle(
         title,
         y=0.99,
@@ -325,21 +294,17 @@ def finish_plot(axis, title: str, y_label: str, output_path: Path) -> list[Path]
         fontweight="bold",
     )
     axis.set_ylabel(y_label)
-    axis.yaxis.grid(True, color=GRID_COLOR, linewidth=0.7)
+    axis.yaxis.grid(
+        True,
+        color=GRID_COLOR,
+        linewidth=DEFAULT_THEME.primary_grid_line_width,
+    )
     axis.set_axisbelow(True)
-    axis.tick_params(axis="both", length=3, width=0.8)
+    apply_main_axis_style(axis)
     axis.margins(x=0.08)
-    axis.spines["top"].set_visible(False)
-    axis.spines["right"].set_visible(False)
-    axis.spines["left"].set_linewidth(0.8)
-    axis.spines["bottom"].set_linewidth(0.8)
     axis.set_ylim(bottom=0)
     axis.figure.tight_layout(rect=(0, 0, 1, LAYOUT_TOP))
-    png_path.parent.mkdir(parents=True, exist_ok=True)
-    axis.figure.savefig(png_path, dpi=300, bbox_inches="tight")
-    axis.figure.savefig(svg_path, bbox_inches="tight")
-    plt.close(axis.figure)
-    return [png_path, svg_path]
+    return save_figure_pair(axis.figure, output_path)
 
 
 def plot_grouped_summary(
@@ -357,7 +322,7 @@ def plot_grouped_summary(
     if not x_labels or not series_labels:
         return []
 
-    figure_width = max(7.5, len(x_labels) * max(len(series_labels), 1) * 0.42)
+    figure_width = max(13, len(x_labels) * max(len(series_labels), 1) * 0.60)
     figure, axis = plt.subplots(figsize=(figure_width, FIGURE_HEIGHT))
     bar_width = min(0.2, 0.82 / max(len(series_labels), 1))
     first_offset = -bar_width * (len(series_labels) - 1) / 2
@@ -429,7 +394,7 @@ def plot_grouped_bars(
     if not outer_groups or not conditions:
         return []
 
-    figure_width = max(7.5, len(outer_groups) * max(len(conditions), 1) * 0.48)
+    figure_width = max(13, len(outer_groups) * max(len(conditions), 1) * 0.68)
     figure, axis = plt.subplots(figsize=(figure_width, FIGURE_HEIGHT))
     bar_width = min(0.22, 0.8 / max(len(conditions), 1))
     first_offset = -bar_width * (len(conditions) - 1) / 2

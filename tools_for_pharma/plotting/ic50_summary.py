@@ -5,11 +5,10 @@ from __future__ import annotations
 from tools_for_pharma.plotting.curve import (
     CurveDescriptor,
     FIT_METHOD_4PL,
-    GRID_COLOR,
-    TEXT_COLOR,
     concentration_label,
     metric_label,
 )
+from tools_for_pharma.plotting.style import DEFAULT_THEME, PlotTheme
 
 
 def descriptor_lines(descriptors: list[CurveDescriptor], log_x: bool) -> list[str]:
@@ -102,6 +101,8 @@ def add_summary_panel(
     descriptors: list[CurveDescriptor],
     log_x: bool,
     descriptor_colors: list[str],
+    *,
+    theme: PlotTheme = DEFAULT_THEME,
 ) -> None:
     if not descriptors:
         return
@@ -115,8 +116,8 @@ def add_summary_panel(
     panel.set_yticks([])
     for spine in panel.spines.values():
         spine.set_visible(True)
-        spine.set_edgecolor(GRID_COLOR)
-        spine.set_linewidth(0.8)
+        spine.set_edgecolor(theme.grid_color)
+        spine.set_linewidth(theme.axis_line_width)
     panel.set_xlim(0, 1)
     panel.set_ylim(0, 1)
 
@@ -126,8 +127,8 @@ def add_summary_panel(
         "Curve summary",
         ha="left",
         va="top",
-        color=TEXT_COLOR,
-        fontsize=9.2,
+        color=theme.text_color,
+        fontsize=theme.panel_title_font_size,
         fontweight="bold",
     )
     y = 0.88
@@ -140,13 +141,21 @@ def add_summary_panel(
             ha="left",
             va="top",
             color=color,
-            fontsize=9,
+            fontsize=theme.panel_series_font_size,
             fontweight="bold",
         )
         y -= 0.048
         for metric, value, is_key in summary_rows(descriptor, log_x):
             if y < 0.05:
-                panel.text(0.05, y, "...", ha="left", va="top", color=TEXT_COLOR, fontsize=8)
+                panel.text(
+                    0.05,
+                    y,
+                    "...",
+                    ha="left",
+                    va="top",
+                    color=theme.text_color,
+                    fontsize=theme.panel_compact_font_size,
+                )
                 return
             row_weight = "bold" if is_key else "normal"
             is_slope_row = metric == "slope"
@@ -158,8 +167,12 @@ def add_summary_panel(
                 metric,
                 ha="left",
                 va="top",
-                color=TEXT_COLOR,
-                fontsize=7.2 if is_slope_row else 7.6,
+                color=theme.text_color,
+                fontsize=(
+                    theme.panel_compact_font_size
+                    if is_slope_row
+                    else theme.panel_metric_font_size
+                ),
                 fontweight=row_weight,
                 family="monospace",
             )
@@ -169,8 +182,12 @@ def add_summary_panel(
                 value,
                 ha="left",
                 va="top",
-                color=TEXT_COLOR,
-                fontsize=7.2 if is_slope_row else 7.6,
+                color=theme.text_color,
+                fontsize=(
+                    theme.panel_compact_font_size
+                    if is_slope_row
+                    else theme.panel_metric_font_size
+                ),
                 fontweight=row_weight,
             )
             y -= 0.031 if is_slope_row else 0.035

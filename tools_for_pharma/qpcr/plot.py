@@ -11,6 +11,12 @@ import sys
 
 import pandas as pd
 
+from tools_for_pharma.plotting.style import (
+    DEFAULT_THEME,
+    apply_main_axis_style,
+    get_pyplot,
+    save_figure_pair,
+)
 from tools_for_pharma.qpcr.common import (
     INDIVIDUAL_RQ_COLUMN,
     MEAN_RQ_COLUMN,
@@ -37,34 +43,27 @@ REQUIRED_COLUMNS = [
     SEM_COLUMN,
 ]
 
-FONT_FAMILY = "Arial"
-FONT_SIZE = 15
-TITLE_FONT_SIZE = 22
-AXIS_LABEL_FONT_SIZE = 20
-TICK_LABEL_FONT_SIZE = 16
-LEGEND_FONT_SIZE = 16
-SPLIT_FIGURE_HEIGHT = 9.0
-COMBINED_FIGURE_HEIGHT = 9.5
-COMBINED_LAYOUT_TOP = 0.80
+FONT_FAMILY = DEFAULT_THEME.font_family
+FONT_SIZE = DEFAULT_THEME.body_font_size
+TITLE_FONT_SIZE = DEFAULT_THEME.title_font_size
+AXIS_LABEL_FONT_SIZE = DEFAULT_THEME.axis_label_font_size
+TICK_LABEL_FONT_SIZE = DEFAULT_THEME.tick_font_size
+LEGEND_FONT_SIZE = DEFAULT_THEME.legend_font_size
+SPLIT_FIGURE_HEIGHT = 10.5
+COMBINED_FIGURE_HEIGHT = 11.0
+COMBINED_LAYOUT_TOP = 0.77
 COMBINED_LEGEND_TOP = 0.91
 MAX_LEGEND_COLUMNS = 4
-TEXT_COLOR = "#222222"
-AXIS_COLOR = "#444444"
-GRID_COLOR = "#E4E4E4"
+TEXT_COLOR = DEFAULT_THEME.text_color
+AXIS_COLOR = DEFAULT_THEME.axis_color
+GRID_COLOR = DEFAULT_THEME.grid_color
 BASELINE_COLOR = "#7A7A7A"
-REFERENCE_PALETTE = [
-    "#4E79A7",
-    "#59A14F",
-    "#F28E2B",
-    "#B07AA1",
-    "#E15759",
-    "#76B7B2",
-]
+REFERENCE_PALETTE = DEFAULT_THEME.palette
 SCATTER_EDGE_COLOR = "#FFFFFF"
 SCATTER_SIZE = 30
 BAR_OUTLINE_WIDTH = 1.45
 ERROR_LINE_WIDTH = 1.05
-AXIS_SPINE_OFFSET_POINTS = 7
+AXIS_SPINE_OFFSET_POINTS = DEFAULT_THEME.spine_offset_points
 
 BAR_KEY_COLUMNS = ["Group", "Compound ID", REFERENCE_SOURCE_COLUMN]
 
@@ -179,33 +178,6 @@ def validate_summary_columns(summary: pd.DataFrame, sheet_name: str | int | None
         )
 
 
-def get_pyplot():
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    plt.rcParams.update(
-        {
-            "font.family": "sans-serif",
-            "font.sans-serif": [FONT_FAMILY, "DejaVu Sans", "Calibri", "Arial"],
-            "font.size": FONT_SIZE,
-            "axes.titlesize": TITLE_FONT_SIZE,
-            "axes.labelsize": AXIS_LABEL_FONT_SIZE,
-            "axes.titleweight": "bold",
-            "axes.edgecolor": AXIS_COLOR,
-            "axes.labelcolor": TEXT_COLOR,
-            "xtick.color": TEXT_COLOR,
-            "ytick.color": TEXT_COLOR,
-            "legend.fontsize": LEGEND_FONT_SIZE,
-            "figure.facecolor": "white",
-            "axes.facecolor": "white",
-            "savefig.facecolor": "white",
-        }
-    )
-    return plt
-
-
 def read_summary(input_file: Path, sheet_name: str | None = None) -> pd.DataFrame:
     sheet = resolve_summary_sheet(input_file, sheet_name)
     summary = pd.read_excel(input_file, sheet_name=sheet)
@@ -228,9 +200,6 @@ def read_summary(input_file: Path, sheet_name: str | None = None) -> pd.DataFram
 
 
 def finish_plot(axis, title: str, labels: list[str], output_path: Path) -> list[Path]:
-    plt = get_pyplot()
-    png_path = output_path.with_suffix(".png")
-    svg_path = output_path.with_suffix(".svg")
     if axis.figure.legends:
         axis.figure.suptitle(
             title,
@@ -250,14 +219,13 @@ def finish_plot(axis, title: str, labels: list[str], output_path: Path) -> list[
         alpha=0.75,
         zorder=0,
     )
-    axis.yaxis.grid(True, color=GRID_COLOR, linewidth=0.55)
+    axis.yaxis.grid(
+        True,
+        color=GRID_COLOR,
+        linewidth=DEFAULT_THEME.primary_grid_line_width,
+    )
     axis.set_axisbelow(True)
-    axis.spines["top"].set_visible(False)
-    axis.spines["right"].set_visible(False)
-    axis.spines["left"].set_linewidth(0.8)
-    axis.spines["bottom"].set_linewidth(0.8)
-    axis.spines["left"].set_position(("outward", AXIS_SPINE_OFFSET_POINTS))
-    axis.spines["bottom"].set_position(("outward", AXIS_SPINE_OFFSET_POINTS))
+    apply_main_axis_style(axis)
     axis.set_xticks(range(len(labels)))
     axis.set_xticklabels(
         labels,
@@ -265,18 +233,13 @@ def finish_plot(axis, title: str, labels: list[str], output_path: Path) -> list[
         ha="center",
         fontsize=TICK_LABEL_FONT_SIZE,
     )
-    axis.tick_params(axis="both", length=3, width=0.8)
     axis.margins(x=0.01)
     axis.set_ylim(bottom=0)
     if axis.figure.legends:
         axis.figure.tight_layout(rect=(0, 0, 1, COMBINED_LAYOUT_TOP))
     else:
         axis.figure.tight_layout()
-    png_path.parent.mkdir(parents=True, exist_ok=True)
-    axis.figure.savefig(png_path, dpi=300, bbox_inches="tight")
-    axis.figure.savefig(svg_path, bbox_inches="tight")
-    plt.close(axis.figure)
-    return [png_path, svg_path]
+    return save_figure_pair(axis.figure, output_path)
 
 
 def plot_split_by_reference(summary: pd.DataFrame, plot_dir: Path) -> list[Path]:
