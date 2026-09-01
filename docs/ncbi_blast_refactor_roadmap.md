@@ -344,7 +344,7 @@ test: lock transcript scan compatibility contracts
 
 ### Phase 2 — Establish generic nucleotide primitives
 
-Status: [ ]
+Status: [x]
 
 Goal: create one authoritative implementation for basic sequence operations.
 
@@ -698,7 +698,7 @@ and any approved deviation from the roadmap.
 |---|---|---|---|---|
 | Baseline | Complete | `44349c4` | 120 tests; packaged self-test and GUI validation completed before checkpoint | Version 1.1.0 |
 | 1. Contracts | Complete | `95bbcda` | 128 tests; CLI help; PyInstaller build; packaged self-test exit 0 | Added compatibility, path, normalization, FASTA, and mismatch contracts; no production code changed |
-| 2. Nucleotide primitives | Not started | | | |
+| 2. Nucleotide primitives | Complete | `ec8a14f` | 135 tests; 95 focused tests; three source CLI smoke checks; PyInstaller build; packaged self-test exit 0 | Added `tools_for_pharma.sequence`; preserved strict oligo and N-aware transcript-panel policies |
 | 3. FASTA/comparison primitives | Not started | | | |
 | 4. Identifiers/NCBI transport | Not started | | | |
 | 5. Scan domain package | Not started | | | |
