@@ -15,7 +15,7 @@ This module has two related workflows:
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 import csv
 from datetime import datetime, timezone
 import hashlib
@@ -61,11 +61,42 @@ from tools_for_pharma.oligo.transcript_accessions import (
     extract_refseq_accession_from_header,
     normalize_versioned_refseq_accession,
 )
-from tools_for_pharma.sequence.comparison import mismatch_positions_1based
+from tools_for_pharma.oligo.transcript_scan.models import (
+    AntisenseQuery,
+    AntisenseRegion,
+    ComparisonResult,
+    PrivatePanelScanResult,
+    QueryTargetSummary,
+    TranscriptMatch,
+    TranscriptTargetResult,
+)
+from tools_for_pharma.oligo.transcript_scan.queries import (
+    DEFAULT_BATCH_BASES,
+    antisense_region_sequence,
+    assign_unique_blast_query_ids,
+    batch_antisense_queries,
+    clean_text_for_id,
+    default_query_name,
+    duplicate_sequence_groups,
+    normalize_sequence_type,
+    parse_fasta_records,
+    parse_plain_antisense_lines,
+    parse_scan_region,
+    parse_scan_regions,
+    read_antisense_file,
+    sanitize_fasta_name,
+)
+from tools_for_pharma.oligo.transcript_scan.scanner import (
+    DEFAULT_MAX_MISMATCHES,
+    closest_transcript_matches,
+    comparison_result_for_region,
+    mismatch_positions,
+    scan_antisense_against_transcript,
+    scan_sense_against_transcript,
+)
 from tools_for_pharma.sequence.fasta import (
     FastaRecord,
     format_fasta,
-    parse_fasta,
 )
 from tools_for_pharma.sequence.nucleotides import (
     normalize_dna as normalize_dna_sequence,
@@ -74,10 +105,8 @@ from tools_for_pharma.sequence.nucleotides import (
 from tools_for_pharma.shared.excel_utils import list_excel_sheets
 
 
-DEFAULT_MAX_MISMATCHES = 3
 DEFAULT_CLOSEST_MATCHES = 10
 DEFAULT_SINGLE_GUI_CLOSEST_MATCHES = 5
-DEFAULT_BATCH_BASES = 1000
 APP_DATA_DIR_NAME = "TranscriptScanData"
 GUI_SETTINGS_FILE_NAME = "settings.json"
 GUI_LOG_FILE_NAME = "transcript_scan.log"
@@ -95,119 +124,6 @@ CSV_COLUMNS = [
     "evalue",
     "bit_score",
 ]
-
-
-@dataclass(frozen=True)
-class AntisenseQuery:
-    """One named AS or SS input sequence."""
-
-    name: str
-    sequence_5to3: str
-    target_accession: str = ""
-    target_gene: str = ""
-    species: str = ""
-    notes: str = ""
-    sequence_type: str = "AS"
-    blast_query_id: str = field(default="", compare=False)
-    source_fields: dict[str, object] = field(default_factory=dict, compare=False, repr=False)
-
-
-@dataclass(frozen=True)
-class AntisenseRegion:
-    """A 1-based inclusive AS subregion to scan."""
-
-    name: str
-    start: int | None = None
-    end: int | None = None
-
-
-@dataclass(frozen=True)
-class TranscriptMatch:
-    """One local AS/SS-vs-transcript match."""
-
-    transcript_name: str
-    antisense_name: str
-    scan_region: str
-    as_region_start: int
-    as_region_end: int
-    antisense_5to3: str
-    antisense_region_5to3: str
-    target_5to3: str
-    transcript_start: int
-    transcript_end: int
-    mismatches: int
-    transcript_window_5to3: str
-    transcript_match_as_5to3: str
-    mismatch_positions_1based: tuple[int, ...]
-    as_mismatch_positions_1based: tuple[int, ...]
-    sequence_type: str = "AS"
-
-
-@dataclass(frozen=True)
-class TranscriptTargetResult:
-    """Retrieval and validation status for one private-panel transcript."""
-
-    requested_accession: str
-    retrieved_accession: str = ""
-    transcript_name: str = ""
-    sequence_5to3: str = field(default="", repr=False)
-    sequence_length_nt: int = 0
-    cache_path: str = ""
-    cache_status: str = ""
-    exact_version_match: bool = False
-    sequence_sha256: str = ""
-    retrieved_at_utc: str = ""
-    status: str = "error"
-    error: str = ""
-
-
-@dataclass(frozen=True)
-class QueryTargetSummary:
-    """One status row for a guide-versus-transcript panel comparison."""
-
-    query_name: str
-    sequence_type: str
-    requested_accession: str
-    retrieved_accession: str
-    target_status: str
-    scan_status: str
-    scan_regions: str
-    match_count: int
-    exact_match_count: int
-    best_mismatches: int | None
-    error: str = ""
-
-
-@dataclass(frozen=True)
-class ComparisonResult:
-    """One compact best-result row for a query, transcript, and scan region."""
-
-    input_order: int
-    query_name: str
-    target_accession: str
-    scan_region: str
-    region_start: int
-    region_end: int
-    result: str
-    sites_within_threshold: int
-    best_mismatches: int | None
-    mismatch_positions_in_query_1based: tuple[int, ...] = ()
-    best_transcript_start: int | None = None
-    best_transcript_end: int | None = None
-    query_region_5to3: str = ""
-    best_match_in_query_orientation_5to3: str = ""
-    differences: str = ""
-
-
-@dataclass(frozen=True)
-class PrivatePanelScanResult:
-    """Complete result of a private local transcript-panel scan."""
-
-    targets: tuple[TranscriptTargetResult, ...]
-    matches: tuple[TranscriptMatch, ...]
-    summaries: tuple[QueryTargetSummary, ...]
-    closest_matches: tuple[TranscriptMatch, ...] = ()
-    comparison_results: tuple[ComparisonResult, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -235,52 +151,6 @@ def fasta_record(name: str, sequence: str, line_width: int = 80) -> str:
     )
 
 
-def sanitize_fasta_name(name: str) -> str:
-    """Return a FASTA-safe query identifier."""
-    cleaned = re.sub(r"[^A-Za-z0-9_.:-]+", "_", clean_text_for_id(name)).strip("_")
-    return cleaned or "oligo_query"
-
-
-def assign_unique_blast_query_ids(records: Iterable[AntisenseQuery]) -> list[AntisenseQuery]:
-    """Return records with stable, unique FASTA identifiers.
-
-    Distinct input names can sanitize to the same FASTA identifier. Preserve the
-    first identifier unchanged and suffix later collisions in input order.
-    """
-    assigned = []
-    used: set[str] = set()
-    next_suffix: dict[str, int] = {}
-    for record in records:
-        base = sanitize_fasta_name(record.blast_query_id or record.name)
-        candidate = base
-        suffix = next_suffix.get(base, 2)
-        while candidate in used:
-            candidate = f"{base}_{suffix}"
-            suffix += 1
-        next_suffix[base] = suffix
-        used.add(candidate)
-        assigned.append(replace(record, blast_query_id=candidate))
-    return assigned
-
-
-def normalize_sequence_type(value: str) -> str:
-    cleaned = clean_text_for_id(value).upper()
-    if cleaned not in {"AS", "SS"}:
-        raise ValueError("Sequence type must be AS or SS.")
-    return cleaned
-
-
-def default_query_name(sequence_type: str, index: int | None = None) -> str:
-    prefix = normalize_sequence_type(sequence_type)
-    if index is None:
-        return "antisense_query" if prefix == "AS" else "sense_query"
-    return f"{prefix}_{index}"
-
-
-def clean_text_for_id(value: object) -> str:
-    return re.sub(r"\s+", " ", str(value)).strip()
-
-
 def multi_fasta(records: Iterable[AntisenseQuery]) -> str:
     """Return a multi-FASTA string for one or more oligo queries."""
     prepared = assign_unique_blast_query_ids(records)
@@ -288,94 +158,6 @@ def multi_fasta(records: Iterable[AntisenseQuery]) -> str:
         fasta_record(record.blast_query_id, record.sequence_5to3)
         for record in prepared
     )
-
-
-def parse_fasta_records(text: str, sequence_type: str = "AS") -> list[AntisenseQuery]:
-    """Parse FASTA text into AS or SS query records."""
-    normalized_type = normalize_sequence_type(sequence_type)
-    lines = str(text).splitlines()
-    first_header_index = next(
-        (
-            index
-            for index, raw_line in enumerate(lines)
-            if raw_line.strip().startswith(">")
-        ),
-        None,
-    )
-    if first_header_index is None:
-        return []
-
-    compatibility_lines = lines[first_header_index:]
-    query_names = []
-    header_count = 0
-    for index, raw_line in enumerate(compatibility_lines):
-        line = raw_line.strip()
-        if not line.startswith(">"):
-            continue
-        header_count += 1
-        query_name = line[1:].strip() or default_query_name(
-            normalized_type,
-            header_count,
-        )
-        query_names.append(query_name)
-        if not line[1:].strip():
-            compatibility_lines[index] = f">{query_name}"
-
-    fasta_records = parse_fasta(
-        "\n".join(compatibility_lines),
-        ignore_comments=False,
-    )
-    return [
-        AntisenseQuery(
-            query_name,
-            normalize_rna(record.sequence),
-            sequence_type=normalized_type,
-        )
-        for query_name, record in zip(query_names, fasta_records)
-    ]
-
-
-def parse_plain_antisense_lines(text: str, sequence_type: str = "AS") -> list[AntisenseQuery]:
-    """Parse a plain text list of AS or SS sequences.
-
-    Accepted line styles:
-      AUGCUA...
-      AS_001,AUGCUA...
-      AS_001<TAB>AUGCUA...
-      AS_001 AUGCUA...
-    """
-    records = []
-    normalized_type = normalize_sequence_type(sequence_type)
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "," in line:
-            parts = [part.strip() for part in line.split(",", 1)]
-        elif "\t" in line:
-            parts = [part.strip() for part in line.split("\t", 1)]
-        else:
-            parts = line.split(maxsplit=1)
-
-        if len(parts) == 2:
-            name, sequence = parts
-        else:
-            name = default_query_name(normalized_type, len(records) + 1)
-            sequence = parts[0]
-        records.append(AntisenseQuery(name, normalize_rna(sequence), sequence_type=normalized_type))
-    return records
-
-
-def read_antisense_file(path: Path, sequence_type: str = "AS") -> list[AntisenseQuery]:
-    """Read AS or SS queries from FASTA or plain text."""
-    text = path.read_text(encoding="utf-8-sig")
-    if any(line.lstrip().startswith(">") for line in text.splitlines()):
-        records = parse_fasta_records(text, sequence_type=sequence_type)
-    else:
-        records = parse_plain_antisense_lines(text, sequence_type=sequence_type)
-    if not records:
-        raise ValueError(f"No {normalize_sequence_type(sequence_type)} sequences found in {path}.")
-    return records
 
 
 def read_antisense_table(
@@ -562,18 +344,6 @@ def read_antisense_queries(
     )
 
 
-def duplicate_sequence_groups(records: list[AntisenseQuery]) -> dict[str, list[str]]:
-    """Return normalized AS sequence to AS names for duplicate sequences only."""
-    groups: dict[str, list[str]] = {}
-    for record in records:
-        groups.setdefault(normalize_rna(record.sequence_5to3), []).append(record.name)
-    return {
-        sequence: names
-        for sequence, names in groups.items()
-        if len(names) > 1
-    }
-
-
 def input_query_rows(records: list[AntisenseQuery]) -> list[dict[str, object]]:
     """Return input query rows with duplicate annotations."""
     prepared_records = assign_unique_blast_query_ids(records)
@@ -601,74 +371,6 @@ def input_query_rows(records: list[AntisenseQuery]) -> list[dict[str, object]]:
                 output_row[column] = value
         rows.append(output_row)
     return rows
-
-
-def batch_antisense_queries(
-    records: list[AntisenseQuery],
-    max_batch_bases: int = DEFAULT_BATCH_BASES,
-) -> list[list[AntisenseQuery]]:
-    """Group short oligo queries into multi-FASTA BLAST batches."""
-    if max_batch_bases < 1:
-        raise ValueError("--max-batch-bases must be 1 or greater.")
-
-    batches: list[list[AntisenseQuery]] = []
-    current: list[AntisenseQuery] = []
-    current_bases = 0
-    for record in records:
-        sequence_bases = len(normalize_rna(record.sequence_5to3))
-        if current and current_bases + sequence_bases > max_batch_bases:
-            batches.append(current)
-            current = []
-            current_bases = 0
-        current.append(record)
-        current_bases += sequence_bases
-    if current:
-        batches.append(current)
-    return batches
-
-
-def parse_scan_region(value: str) -> AntisenseRegion:
-    """Parse scan region specs such as full, 2-18, or seed:2-8."""
-    text = clean_text_for_id(value)
-    if not text:
-        raise ValueError("Scan region cannot be blank.")
-    if text.lower() == "full":
-        return AntisenseRegion("full")
-
-    if ":" in text:
-        name, range_text = [part.strip() for part in text.split(":", 1)]
-    else:
-        name = text
-        range_text = text
-    match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", range_text)
-    if not match:
-        raise ValueError(
-            f"Invalid scan region '{value}'. Use 'full', '2-18', or 'seed:2-8'."
-        )
-
-    start = int(match.group(1))
-    end = int(match.group(2))
-    if start < 1 or end < start:
-        raise ValueError(f"Invalid scan region coordinates: {value}")
-    return AntisenseRegion(name or f"{start}-{end}", start, end)
-
-
-def parse_scan_regions(values: list[str] | None) -> list[AntisenseRegion]:
-    if not values:
-        return [AntisenseRegion("full")]
-    return [parse_scan_region(value) for value in values]
-
-
-def antisense_region_sequence(sequence: str, region: AntisenseRegion) -> tuple[str, int, int]:
-    antisense = normalize_rna(sequence)
-    if region.start is None or region.end is None:
-        return antisense, 1, len(antisense)
-    if region.end > len(antisense):
-        raise ValueError(
-            f"Scan region {region.name} ends at {region.end}, but AS sequence "
-            f"is only {len(antisense)} nt."
-        )
-    return antisense[region.start - 1 : region.end], region.start, region.end
 
 
 def transcript_cache_path(cache_dir: Path, accession: str) -> Path:
@@ -1057,92 +759,6 @@ def local_transcript_target_from_args(args: argparse.Namespace) -> TranscriptTar
     )
 
 
-def mismatch_positions(query: str, target: str) -> tuple[int, ...]:
-    """Return 1-based mismatch positions between equal-length RNA strings."""
-    return mismatch_positions_1based(query, target)
-
-
-def scan_antisense_against_transcript(
-    antisense_5to3: str,
-    transcript_sequence: str,
-    transcript_name: str = "target_transcript",
-    antisense_name: str = "antisense_query",
-    scan_region: AntisenseRegion | None = None,
-    max_mismatches: int | None = DEFAULT_MAX_MISMATCHES,
-    sequence_type: str = "AS",
-) -> list[TranscriptMatch]:
-    """Find AS or SS target windows in a transcript.
-
-    The transcript window is reported in transcript 5'->3' orientation. AS
-    oligos are reverse-complemented to the expected transcript target. SS
-    oligos are compared directly to the transcript.
-    """
-    normalized_type = normalize_sequence_type(sequence_type)
-    antisense = normalize_rna(antisense_5to3)
-    transcript = normalize_rna(transcript_sequence)
-    region = scan_region or AntisenseRegion("full")
-    region_sequence, region_start, region_end = antisense_region_sequence(antisense, region)
-    target = (
-        get_complementary_sequence(region_sequence, reverse=True)
-        if normalized_type == "AS"
-        else region_sequence
-    )
-    if len(transcript) < len(target):
-        return []
-
-    matches = []
-    for start_index in range(0, len(transcript) - len(target) + 1):
-        window = transcript[start_index : start_index + len(target)]
-        mismatches = mismatch_positions(target, window)
-        if max_mismatches is None or len(mismatches) <= max_mismatches:
-            transcript_match_as = (
-                get_complementary_sequence(window, reverse=True)
-                if normalized_type == "AS"
-                else window
-            )
-            matches.append(
-                TranscriptMatch(
-                    transcript_name=transcript_name,
-                    antisense_name=antisense_name,
-                    scan_region=region.name,
-                    as_region_start=region_start,
-                    as_region_end=region_end,
-                    antisense_5to3=antisense,
-                    antisense_region_5to3=region_sequence,
-                    target_5to3=target,
-                    transcript_start=start_index + 1,
-                    transcript_end=start_index + len(target),
-                    mismatches=len(mismatches),
-                    transcript_window_5to3=window,
-                    transcript_match_as_5to3=transcript_match_as,
-                    mismatch_positions_1based=mismatches,
-                    as_mismatch_positions_1based=mismatch_positions(region_sequence, transcript_match_as),
-                    sequence_type=normalized_type,
-                )
-            )
-    return sorted(matches, key=lambda item: (item.mismatches, item.transcript_start))
-
-
-def scan_sense_against_transcript(
-    sense_5to3: str,
-    transcript_sequence: str,
-    transcript_name: str = "target_transcript",
-    sense_name: str = "ss_query",
-    scan_region: AntisenseRegion | None = None,
-    max_mismatches: int | None = DEFAULT_MAX_MISMATCHES,
-) -> list[TranscriptMatch]:
-    """Find direct sense target windows in a transcript."""
-    return scan_antisense_against_transcript(
-        antisense_5to3=sense_5to3,
-        transcript_sequence=transcript_sequence,
-        transcript_name=transcript_name,
-        antisense_name=sense_name,
-        scan_region=scan_region,
-        max_mismatches=max_mismatches,
-        sequence_type="SS",
-    )
-
-
 def transcript_matches_to_csv(matches: Iterable[TranscriptMatch]) -> str:
     """Format local transcript matches as CSV text."""
     output = io.StringIO()
@@ -1243,20 +859,6 @@ def transcript_match_terminal_table(matches: Iterable[TranscriptMatch]) -> str:
         for match in match_list
     ]
     return terminal_table(headers, rows)
-
-
-def closest_transcript_matches(matches: Iterable[TranscriptMatch], limit: int) -> list[TranscriptMatch]:
-    if limit < 1:
-        raise ValueError("--closest must be 1 or greater.")
-    return sorted(
-        matches,
-        key=lambda match: (
-            match.mismatches,
-            match.transcript_start,
-            match.antisense_name,
-            match.scan_region,
-        ),
-    )[:limit]
 
 
 def format_transcript_matches_for_terminal(
@@ -1370,78 +972,6 @@ def transcript_match_rows(
         )
         rows.append(row)
     return rows
-
-
-def comparison_result_for_region(
-    *,
-    input_order: int,
-    query: AntisenseQuery,
-    target_accession: str,
-    scan_region: AntisenseRegion,
-    passing_matches: Iterable[TranscriptMatch] = (),
-    all_matches: Iterable[TranscriptMatch] = (),
-    target_error: str = "",
-) -> ComparisonResult:
-    """Build one user-facing best comparison for a query/target/region."""
-    query_region, region_start, region_end = antisense_region_sequence(
-        query.sequence_5to3,
-        scan_region,
-    )
-    passing = sorted(
-        passing_matches,
-        key=lambda match: (match.mismatches, match.transcript_start),
-    )
-    candidates = sorted(
-        all_matches,
-        key=lambda match: (match.mismatches, match.transcript_start),
-    )
-    best = passing[0] if passing else candidates[0] if candidates else None
-
-    if target_error:
-        result = "target_error"
-    elif passing:
-        result = "exact_match" if best and best.mismatches == 0 else "match"
-    else:
-        result = "no_match"
-
-    mismatch_positions: tuple[int, ...] = ()
-    differences = ""
-    if best is not None:
-        mismatch_positions = tuple(
-            region_start + position - 1
-            for position in best.as_mismatch_positions_1based
-        )
-        difference_items = []
-        for relative_position, (expected_base, observed_base) in enumerate(
-            zip(query_region, best.transcript_match_as_5to3),
-            start=1,
-        ):
-            if expected_base != observed_base:
-                full_position = region_start + relative_position - 1
-                difference_items.append(
-                    f"{full_position}:{expected_base}>{observed_base}"
-                )
-        differences = "; ".join(difference_items) or "None"
-
-    return ComparisonResult(
-        input_order=input_order,
-        query_name=query.name,
-        target_accession=target_accession,
-        scan_region=scan_region.name,
-        region_start=region_start,
-        region_end=region_end,
-        result=result,
-        sites_within_threshold=len(passing),
-        best_mismatches=best.mismatches if best is not None else None,
-        mismatch_positions_in_query_1based=mismatch_positions,
-        best_transcript_start=best.transcript_start if best is not None else None,
-        best_transcript_end=best.transcript_end if best is not None else None,
-        query_region_5to3=query_region,
-        best_match_in_query_orientation_5to3=(
-            best.transcript_match_as_5to3 if best is not None else ""
-        ),
-        differences=differences,
-    )
 
 
 def comparison_result_rows(
