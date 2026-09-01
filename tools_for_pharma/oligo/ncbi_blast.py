@@ -15,10 +15,7 @@ This module has two related workflows:
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
-import csv
 from datetime import datetime, timezone
-import io
 import json
 import logging
 import math
@@ -26,7 +23,6 @@ import os
 from pathlib import Path
 import re
 import sys
-import time
 from typing import Callable, Iterable
 
 from tools_for_pharma.oligo.core import get_complementary_sequence
@@ -110,6 +106,16 @@ from tools_for_pharma.oligo.transcript_scan.reporting import (
     write_excel_workbook,
     write_result_workbook,
 )
+from tools_for_pharma.oligo.transcript_scan.remote_blast import (
+    BlastBatchResult,
+    RemoteBlastConfig,
+    append_rid_log,
+    combine_blast_csv,
+    fasta_record,
+    multi_fasta,
+    normalize_dna,
+    run_blast_batches as run_remote_blast_batches,
+)
 from tools_for_pharma.oligo.transcript_scan.scanner import (
     DEFAULT_MAX_MISMATCHES,
     closest_transcript_matches,
@@ -135,14 +141,17 @@ from tools_for_pharma.oligo.transcript_scan.targets import (
     transcript_target_source,
     validate_single_transcript_record,
 )
-from tools_for_pharma.sequence.fasta import (
-    FastaRecord,
-    format_fasta,
+from tools_for_pharma.oligo.transcript_scan.workflows import (
+    LocalScanConfig,
+    PrivatePanelWorkflowConfig,
+    SingleSequenceScanConfig,
+    run_local_scan as run_local_scan_workflow,
+    run_local_scan_with_comparison as run_local_comparison_workflow,
+    run_private_panel_scan,
+    run_private_panel_workflow as run_private_panel_domain_workflow,
+    run_single_sequence_scan as run_single_sequence_domain_workflow,
 )
-from tools_for_pharma.sequence.nucleotides import (
-    normalize_dna as normalize_dna_sequence,
-    normalize_rna,
-)
+from tools_for_pharma.sequence.nucleotides import normalize_rna
 from tools_for_pharma.shared.excel_utils import list_excel_sheets
 
 
@@ -151,40 +160,6 @@ DEFAULT_SINGLE_GUI_CLOSEST_MATCHES = 5
 APP_DATA_DIR_NAME = "TranscriptScanData"
 GUI_SETTINGS_FILE_NAME = "settings.json"
 GUI_LOG_FILE_NAME = "transcript_scan.log"
-
-
-@dataclass(frozen=True)
-class BlastBatchResult:
-    """One completed BLAST batch and its returned CSV text."""
-
-    batch_index: int
-    submission: BlastSubmission
-    queries: tuple[AntisenseQuery, ...]
-    csv_text: str
-
-
-def normalize_dna(sequence: str) -> str:
-    """Normalize a sequence to DNA letters for NCBI BLAST requests."""
-    return normalize_dna_sequence(sequence)
-
-
-def fasta_record(name: str, sequence: str, line_width: int = 80) -> str:
-    """Return a simple FASTA record from a raw nucleotide sequence."""
-    cleaned = normalize_dna(sequence)
-    return format_fasta(
-        FastaRecord(sanitize_fasta_name(name), "", cleaned),
-        width=line_width,
-        trailing_newline=False,
-    )
-
-
-def multi_fasta(records: Iterable[AntisenseQuery]) -> str:
-    """Return a multi-FASTA string for one or more oligo queries."""
-    prepared = assign_unique_blast_query_ids(records)
-    return "\n".join(
-        fasta_record(record.blast_query_id, record.sequence_5to3)
-        for record in prepared
-    )
 
 
 def read_antisense_table(
@@ -1130,42 +1105,29 @@ def run_single_sequence_scan(
             offline=False,
             refresh=bool(getattr(args, "refresh_targets", False)),
         )
-        assert source.cache_dir is not None
-        targets = retrieve_transcript_targets(
-            [source.accession],
-            email=args.email,
-            tool=args.tool,
-            cache_dir=source.cache_dir,
-            offline=source.offline,
-            refresh=source.refresh,
-            request_seconds=args.request_seconds,
-            client=client,
-            progress_callback=progress_callback,
-        )
     else:
-        targets = [local_transcript_target_from_args(args)]
-        if progress_callback:
-            progress_callback(
-                1,
-                1,
-                targets[0].transcript_name,
-                targets[0].cache_status,
-            )
-    target = targets[0]
-    if target.status != "ready":
-        target_label = accessions[0] if accessions else target.transcript_name
-        raise ValueError(target.error or f"Transcript {target_label} could not be prepared.")
+        source = transcript_target_source(
+            transcript_sequence=args.target_sequence,
+            transcript_file=args.target_file,
+        )
 
     queries = args_antisense_queries(args)
     if len(queries) != 1:
         raise ValueError("Single-sequence mode requires exactly one AS or SS sequence.")
     scan_regions = parse_scan_regions(args.scan_region)
-    result = run_private_panel_scan(
-        queries,
-        targets,
+    result = run_single_sequence_domain_workflow(
+        SingleSequenceScanConfig(
+            target_source=source,
+            email=args.email,
+            tool=args.tool,
+            request_seconds=args.request_seconds,
+            max_mismatches=args.max_mismatches,
+            closest=args.closest,
+        ),
+        queries[0],
         scan_regions,
-        args.max_mismatches,
-        closest=args.closest,
+        progress_callback=progress_callback,
+        client=client,
     )
     return queries, scan_regions, result
 
@@ -2174,64 +2136,32 @@ def args_antisense_queries(args: argparse.Namespace) -> list[AntisenseQuery]:
     )
 
 
+def local_scan_config_from_args(args: argparse.Namespace) -> LocalScanConfig:
+    """Adapt legacy CLI/GUI arguments to the explicit local workflow config."""
+    return LocalScanConfig(
+        target_accessions=tuple(target_accession_values(args.target_accession)),
+        use_query_target_accession=bool(args.target_accession_column),
+        target_sequence=args.target_sequence,
+        target_file=args.target_file,
+        email=args.email,
+        tool=args.tool,
+        cache_dir=args.cache_dir,
+        max_mismatches=args.max_mismatches,
+    )
+
+
 def run_local_scan(
     args: argparse.Namespace,
     queries: list[AntisenseQuery],
     scan_regions: list[AntisenseRegion],
     max_mismatches: int | None = DEFAULT_MAX_MISMATCHES,
 ) -> list[TranscriptMatch]:
-    if max_mismatches == DEFAULT_MAX_MISMATCHES:
-        max_mismatches = args.max_mismatches
-    matches = []
-    shared_transcript: tuple[str, str] | None = None
-    if args.target_accession_column:
-        missing_accessions = [query.name for query in queries if not query.target_accession]
-        if missing_accessions:
-            names = ", ".join(missing_accessions)
-            raise ValueError(
-                "Missing target accession for query row(s): "
-                f"{names}. Fill --target-accession-column for every query."
-            )
-    if not args.target_accession_column:
-        accessions = target_accession_values(args.target_accession)
-        if len(accessions) > 1:
-            raise ValueError(
-                "Multiple --target-accession values require private panel mode."
-            )
-        shared_transcript = read_transcript_input(
-            transcript_sequence=args.target_sequence,
-            transcript_file=args.target_file,
-            accession=accessions[0] if accessions else None,
-            email=args.email,
-            tool=args.tool,
-            cache_dir=args.cache_dir,
-        )
-
-    for query in queries:
-        if args.target_accession_column:
-            transcript_name, transcript = read_transcript_input(
-                accession=query.target_accession,
-                email=args.email,
-                tool=args.tool,
-                cache_dir=args.cache_dir,
-            )
-        else:
-            assert shared_transcript is not None
-            transcript_name, transcript = shared_transcript
-
-        for scan_region in scan_regions:
-            matches.extend(
-                scan_antisense_against_transcript(
-                    query.sequence_5to3,
-                    transcript,
-                    transcript_name=transcript_name,
-                    antisense_name=query.name,
-                    scan_region=scan_region,
-                    max_mismatches=max_mismatches,
-                    sequence_type=query.sequence_type,
-                )
-            )
-    return matches
+    return run_local_scan_workflow(
+        local_scan_config_from_args(args),
+        queries,
+        scan_regions,
+        max_mismatches=max_mismatches,
+    )
 
 
 def run_local_scan_with_comparison(
@@ -2240,229 +2170,11 @@ def run_local_scan_with_comparison(
     scan_regions: list[AntisenseRegion],
 ) -> tuple[list[TranscriptMatch], list[ComparisonResult]]:
     """Run the GUI table scan and build one compact result per selected region."""
-    matches: list[TranscriptMatch] = []
-    comparison_results: list[ComparisonResult] = []
-    shared_transcript: tuple[str, str] | None = None
-    shared_target_label = ""
-
-    if args.target_accession_column:
-        missing_accessions = [query.name for query in queries if not query.target_accession]
-        if missing_accessions:
-            names = ", ".join(missing_accessions)
-            raise ValueError(
-                "Missing target accession for query row(s): "
-                f"{names}. Fill --target-accession-column for every query."
-            )
-    else:
-        accessions = target_accession_values(args.target_accession)
-        if len(accessions) > 1:
-            raise ValueError(
-                "Multiple --target-accession values require private panel mode."
-            )
-        shared_transcript = read_transcript_input(
-            transcript_sequence=args.target_sequence,
-            transcript_file=args.target_file,
-            accession=accessions[0] if accessions else None,
-            email=args.email,
-            tool=args.tool,
-            cache_dir=args.cache_dir,
-        )
-        shared_target_label = accessions[0] if accessions else shared_transcript[0]
-
-    for input_order, query in enumerate(queries, start=1):
-        if args.target_accession_column:
-            transcript_name, transcript = read_transcript_input(
-                accession=query.target_accession,
-                email=args.email,
-                tool=args.tool,
-                cache_dir=args.cache_dir,
-            )
-            target_label = query.target_accession
-        else:
-            assert shared_transcript is not None
-            transcript_name, transcript = shared_transcript
-            target_label = shared_target_label
-
-        for scan_region in scan_regions:
-            all_region_matches = scan_antisense_against_transcript(
-                query.sequence_5to3,
-                transcript,
-                transcript_name=transcript_name,
-                antisense_name=query.name,
-                scan_region=scan_region,
-                max_mismatches=None,
-                sequence_type=query.sequence_type,
-            )
-            passing_matches = [
-                match
-                for match in all_region_matches
-                if match.mismatches <= args.max_mismatches
-            ]
-            matches.extend(passing_matches)
-            comparison_results.append(
-                comparison_result_for_region(
-                    input_order=input_order,
-                    query=query,
-                    target_accession=target_label,
-                    scan_region=scan_region,
-                    passing_matches=passing_matches,
-                    all_matches=all_region_matches,
-                )
-            )
-
-    return matches, comparison_results
-
-
-def run_private_panel_scan(
-    queries: list[AntisenseQuery],
-    targets: list[TranscriptTargetResult],
-    scan_regions: list[AntisenseRegion],
-    max_mismatches: int,
-    closest: int | None = None,
-) -> PrivatePanelScanResult:
-    """Scan every private guide against every transcript target locally."""
-    matches: list[TranscriptMatch] = []
-    panel_closest_matches: list[TranscriptMatch] = []
-    summaries: list[QueryTargetSummary] = []
-    comparison_results: list[ComparisonResult] = []
-    region_names = ";".join(region.name for region in scan_regions)
-
-    for input_order, query in enumerate(queries, start=1):
-        sequence_type = normalize_sequence_type(query.sequence_type)
-        for target in targets:
-            if target.status != "ready":
-                for scan_region in scan_regions:
-                    comparison_results.append(
-                        comparison_result_for_region(
-                            input_order=input_order,
-                            query=query,
-                            target_accession=target.requested_accession,
-                            scan_region=scan_region,
-                            target_error=target.error,
-                        )
-                    )
-                summaries.append(
-                    QueryTargetSummary(
-                        query_name=query.name,
-                        sequence_type=sequence_type,
-                        requested_accession=target.requested_accession,
-                        retrieved_accession=target.retrieved_accession,
-                        target_status=target.status,
-                        scan_status="target_error",
-                        scan_regions=region_names,
-                        match_count=0,
-                        exact_match_count=0,
-                        best_mismatches=None,
-                        error=target.error,
-                    )
-                )
-                continue
-
-            pair_matches = []
-            pair_all_matches = []
-            for scan_region in scan_regions:
-                region_matches = scan_antisense_against_transcript(
-                    query.sequence_5to3,
-                    target.sequence_5to3,
-                    transcript_name=target.transcript_name or target.retrieved_accession,
-                    antisense_name=query.name,
-                    scan_region=scan_region,
-                    max_mismatches=None,
-                    sequence_type=sequence_type,
-                )
-                pair_all_matches.extend(region_matches)
-                passing_region_matches = [
-                    match
-                    for match in region_matches
-                    if match.mismatches <= max_mismatches
-                ]
-                pair_matches.extend(passing_region_matches)
-                comparison_results.append(
-                    comparison_result_for_region(
-                        input_order=input_order,
-                        query=query,
-                        target_accession=target.requested_accession,
-                        scan_region=scan_region,
-                        passing_matches=passing_region_matches,
-                        all_matches=region_matches,
-                    )
-                )
-                if closest is not None:
-                    panel_closest_matches.extend(
-                        closest_transcript_matches(region_matches, closest)
-                    )
-            matches.extend(pair_matches)
-            summaries.append(
-                QueryTargetSummary(
-                    query_name=query.name,
-                    sequence_type=sequence_type,
-                    requested_accession=target.requested_accession,
-                    retrieved_accession=target.retrieved_accession,
-                    target_status=target.status,
-                    scan_status="matched" if pair_matches else "no_match",
-                    scan_regions=region_names,
-                    match_count=len(pair_matches),
-                    exact_match_count=sum(match.mismatches == 0 for match in pair_matches),
-                    best_mismatches=(
-                        min(
-                            match.mismatches
-                            for match in (
-                                pair_all_matches if closest is not None else pair_matches
-                            )
-                        )
-                        if (pair_all_matches if closest is not None else pair_matches)
-                        else None
-                    ),
-                )
-            )
-
-    return PrivatePanelScanResult(
-        targets=tuple(targets),
-        matches=tuple(matches),
-        summaries=tuple(summaries),
-        closest_matches=tuple(panel_closest_matches),
-        comparison_results=tuple(comparison_results),
+    return run_local_comparison_workflow(
+        local_scan_config_from_args(args),
+        queries,
+        scan_regions,
     )
-
-
-def combine_blast_csv(outputs: Iterable[BlastBatchResult]) -> str:
-    combined = io.StringIO()
-    writer = csv.writer(combined, lineterminator="\n")
-    writer.writerow(["rid", *CSV_COLUMNS])
-    for result in outputs:
-        for row in parse_blast_csv(result.csv_text):
-            writer.writerow([result.submission.rid, *[row[column] for column in CSV_COLUMNS]])
-    return combined.getvalue()
-
-
-def append_rid_log(path: Path, result: BlastBatchResult) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = not path.exists()
-    with path.open("a", encoding="utf-8", newline="") as output_file:
-        writer = csv.writer(output_file)
-        if write_header:
-            writer.writerow(
-                [
-                    "batch_index",
-                    "rid",
-                    "rtoe_seconds",
-                    "query_count",
-                    "total_query_bases",
-                    "query_names",
-                    "submitted_at_utc",
-                ]
-            )
-        writer.writerow(
-            [
-                result.batch_index,
-                result.submission.rid,
-                result.submission.rtoe_seconds,
-                len(result.queries),
-                sum(len(normalize_rna(query.sequence_5to3)) for query in result.queries),
-                ";".join(query.name for query in result.queries),
-                datetime.now(timezone.utc).isoformat(),
-            ]
-        )
 
 
 def run_blast_batches(
@@ -2472,58 +2184,25 @@ def run_blast_batches(
     client_factory: Callable[..., NcbiBlastClient] | None = None,
     sleeper: Callable[[float], None] | None = None,
 ) -> list[BlastBatchResult]:
-    queries = assign_unique_blast_query_ids(queries)
-    print(
-        "Privacy warning: remote NCBI BLAST will transmit "
-        f"{len(queries)} oligo sequence(s) outside this computer.",
-        file=sys.stderr,
-    )
-    make_client = client_factory or NcbiBlastClient
-    sleep = sleeper or time.sleep
-    client = make_client(
-        email=require_email(args.email),
-        tool=args.tool,
-        request_seconds=max(args.request_seconds, DEFAULT_REQUEST_SECONDS),
-    )
-    outputs = []
-    batches = batch_antisense_queries(queries, args.max_batch_bases)
-    for batch_index, batch in enumerate(batches, start=1):
-        print(
-            f"Submitting BLAST batch {batch_index}/{len(batches)} "
-            f"({len(batch)} oligo sequences)...",
-            file=sys.stderr,
-        )
-        submission = client.submit_blastn(
-            query_fasta=multi_fasta(batch),
+    return run_remote_blast_batches(
+        RemoteBlastConfig(
+            email=args.email,
+            tool=args.tool,
             database=args.database,
             expect=args.expect,
             word_size=args.word_size,
             hitlist_size=args.hitlist_size,
             megablast=args.megablast,
-        )
-        submitted_result = BlastBatchResult(
-            batch_index=batch_index,
-            submission=submission,
-            queries=tuple(batch),
-            csv_text="",
-        )
-        if args.rid_log:
-            append_rid_log(args.rid_log, submitted_result)
-        if submission.rtoe_seconds:
-            sleep(max(submission.rtoe_seconds, DEFAULT_REQUEST_SECONDS))
-        client.wait_for_result(
-            submission.rid,
-            poll_seconds=max(args.poll_seconds, DEFAULT_POLL_SECONDS),
             timeout_seconds=args.timeout_seconds,
-        )
-        result = BlastBatchResult(
-            batch_index=batch_index,
-            submission=submission,
-            queries=tuple(batch),
-            csv_text=client.fetch_csv(submission.rid, alignments=args.hitlist_size),
-        )
-        outputs.append(result)
-    return outputs
+            max_batch_bases=args.max_batch_bases,
+            request_seconds=args.request_seconds,
+            poll_seconds=args.poll_seconds,
+            rid_log=args.rid_log,
+        ),
+        queries,
+        client_factory=client_factory,
+        sleeper=sleeper,
+    )
 
 
 def run_private_panel_workflow(
@@ -2542,35 +2221,28 @@ def run_private_panel_workflow(
         "NCBI EFetch requests contain transcript accessions only.",
         file=sys.stderr,
     )
-    targets = retrieve_transcript_targets(
-        accessions,
-        email=args.email,
-        tool=args.tool,
-        cache_dir=cache_dir,
-        offline=args.offline,
-        refresh=bool(getattr(args, "refresh_targets", False)),
-        request_seconds=args.request_seconds,
+    queries: list[AntisenseQuery] = (
+        [] if args.download_targets_only else args_antisense_queries(args)
+    )
+    scan_regions = parse_scan_regions(args.scan_region)
+    panel_result = run_private_panel_domain_workflow(
+        PrivatePanelWorkflowConfig(
+            accessions=tuple(accessions),
+            cache_dir=cache_dir,
+            email=args.email,
+            tool=args.tool,
+            offline=args.offline,
+            refresh=bool(getattr(args, "refresh_targets", False)),
+            request_seconds=args.request_seconds,
+            max_mismatches=args.max_mismatches,
+            closest=args.closest,
+            download_targets_only=args.download_targets_only,
+        ),
+        queries,
+        scan_regions,
         progress_callback=progress_callback,
         cancel_check=cancel_check,
     )
-
-    queries: list[AntisenseQuery] = []
-    scan_regions = parse_scan_regions(args.scan_region)
-    if args.download_targets_only:
-        panel_result = PrivatePanelScanResult(
-            targets=tuple(targets),
-            matches=(),
-            summaries=(),
-        )
-    else:
-        queries = args_antisense_queries(args)
-        panel_result = run_private_panel_scan(
-            queries,
-            targets,
-            scan_regions,
-            args.max_mismatches,
-            closest=args.closest,
-        )
 
     local_matches = list(panel_result.matches)
     if args.output:

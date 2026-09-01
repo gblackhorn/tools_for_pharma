@@ -26,24 +26,13 @@ from tools_for_pharma.oligo.transcript_scan.queries import (
     duplicate_sequence_groups,
     normalize_sequence_type,
 )
+from tools_for_pharma.oligo.transcript_scan.remote_blast import (
+    CSV_COLUMNS,
+    filter_blast_rows,
+    parse_blast_csv,
+)
 from tools_for_pharma.sequence.nucleotides import normalize_rna
 from tools_for_pharma.shared.excel_utils import sanitize_sheet_name
-
-
-CSV_COLUMNS = [
-    "query_id",
-    "subject_id",
-    "percent_identity",
-    "alignment_length",
-    "mismatches",
-    "gap_opens",
-    "query_start",
-    "query_end",
-    "subject_start",
-    "subject_end",
-    "evalue",
-    "bit_score",
-]
 
 
 class BlastBatchResultLike(Protocol):
@@ -254,17 +243,6 @@ def format_closest_transcript_matches_for_terminal(
     return output.getvalue()
 
 
-def parse_blast_csv(text: str) -> list[dict[str, str]]:
-    """Parse NCBI tabular CSV BLAST output into dictionaries."""
-    rows = []
-    for row in csv.reader(io.StringIO(text)):
-        if not row or row[0].startswith("#"):
-            continue
-        if len(row) == len(CSV_COLUMNS):
-            rows.append(dict(zip(CSV_COLUMNS, row)))
-    return rows
-
-
 def transcript_match_rows(
     matches: Iterable[TranscriptMatch],
     *,
@@ -409,29 +387,6 @@ def blast_raw_rows(
                 }
             )
     return rows
-
-
-def filter_blast_rows(
-    rows: Iterable[dict[str, object]],
-    max_mismatches: int,
-    max_gap_opens: int,
-    min_alignment_fraction: float,
-) -> list[dict[str, object]]:
-    filtered = []
-    for row in rows:
-        try:
-            mismatches = int(float(row["mismatches"]))
-            gap_opens = int(float(row["gap_opens"]))
-            alignment_fraction = float(row["alignment_fraction"])
-        except (TypeError, ValueError):
-            continue
-        if (
-            mismatches <= max_mismatches
-            and gap_opens <= max_gap_opens
-            and alignment_fraction >= min_alignment_fraction
-        ):
-            filtered.append(row)
-    return filtered
 
 
 def blast_batch_rows(
