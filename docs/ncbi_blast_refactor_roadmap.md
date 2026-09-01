@@ -535,7 +535,7 @@ refactor: extract transcript scan reporting
 
 ### Phase 8 — Extract workflows and remote BLAST
 
-Status: [ ]
+Status: [x]
 
 Goal: separate orchestration from interfaces and keep remote submission
 explicit.
@@ -704,7 +704,7 @@ and any approved deviation from the roadmap.
 | 5. Scan domain package | Complete | `c0c3740` | 163 tests; 88 focused tests; AS and SS source smoke scans; CLI help; PyInstaller build; packaged self-test exit 0 | Added dependency-light models, query preparation, and pure scanner modules; retained pandas table loading and workbook projections in the facade for later interface/reporting phases; `ncbi_blast.py` reduced from 4,067 to 3,597 lines |
 | 6. Targets/cache | Complete | `cc7028c` | 171 tests; 96 focused tests; three source CLI smoke checks; CLI help; PyInstaller build; packaged self-test exit 0; packaged GUI checks for pasted, local-file, and cached-accession targets | Added explicit immutable target-source models and mocked cache-miss/reuse/refresh/offline coverage; pasted/local content remains local and is not cached; `ncbi_blast.py` reduced from 3,597 to 3,342 lines |
 | 7. Reporting | Complete | `833b254` | 177 tests; 102 focused tests; CLI help; PyInstaller build; packaged self-test exit 0; packaged single-text GUI check; representative offline multiple-workbook generation and visual/schema inspection | Added dedicated reporting/workbook composition with shared sheet-name sanitization; preserved source fields such as `Pos20`, one-based mismatch coordinates, technical detail output, and compatibility re-exports; `ncbi_blast.py` reduced from 3,342 to 2,745 lines. The native file picker was not targetable by the GUI automation API, so the multiple-workbook gate used the equivalent source workflow against a local transcript; packaged reporting imports were verified by the build/self-test. |
-| 8. Workflows/remote BLAST | Not started | | | |
+| 8. Workflows/remote BLAST | Complete | `afa3183` | 185 tests including mocked remote-BLAST lifecycle; CLI help; direct AS, SS, and offline cached-panel smoke scans; PyInstaller build; packaged self-test exit 0; packaged first-use email and mode chooser opened | Added explicit local, single, and panel workflow configs plus a clearly named remote-BLAST service for submission, polling, retrieval, filtering, batching, and RID logs; preserved facade imports and privacy warnings; local workflows do not import `argparse`, `remote_blast`, or `NcbiBlastClient`; `ncbi_blast.py` reduced from 2,745 to 2,417 lines. The GUI automation API lost the Tk window during the single-form transition, so the full packaged GUI gate was not repeated; source workflow contracts and the packaged import/self-test gate passed. |
 | 9. CLI | Not started | | | |
 | 10. GUI/portable services | Not started | | | |
 | 11. Compatibility facade | Not started | | | |
