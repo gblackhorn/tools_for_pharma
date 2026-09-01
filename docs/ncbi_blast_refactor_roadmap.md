@@ -408,7 +408,7 @@ refactor: share FASTA and sequence comparison primitives
 
 ### Phase 4 — Extract transcript identifiers and NCBI transport
 
-Status: [ ]
+Status: [x]
 
 Goal: share stable transcript/NCBI infrastructure without hiding the privacy
 boundary.
@@ -700,7 +700,7 @@ and any approved deviation from the roadmap.
 | 1. Contracts | Complete | `95bbcda` | 128 tests; CLI help; PyInstaller build; packaged self-test exit 0 | Added compatibility, path, normalization, FASTA, and mismatch contracts; no production code changed |
 | 2. Nucleotide primitives | Complete | `ec8a14f` | 135 tests; 95 focused tests; three source CLI smoke checks; PyInstaller build; packaged self-test exit 0 | Added `tools_for_pharma.sequence`; preserved strict oligo and N-aware transcript-panel policies |
 | 3. FASTA/comparison primitives | Complete | `9f94705` | 144 tests; 104 focused tests; source FASTA/scan/format smoke checks; PyInstaller build; packaged self-test exit 0 | Shared structural FASTA parsing and equal-length comparison; preserved panel, query, and single-transcript adapters |
-| 4. Identifiers/NCBI transport | Not started | | | |
+| 4. Identifiers/NCBI transport | Complete | `f227540` | 158 tests; 97 focused tests; CLI help; PyInstaller build; packaged self-test exit 0 | Extracted RefSeq parsing and injectable NCBI transport; tests keep EFetch accession-only and remote BLAST query submission distinct; left `transcript_panel.py` transport unchanged because it shares different URL/contact/response handling with Ensembl |
 | 5. Scan domain package | Not started | | | |
 | 6. Targets/cache | Not started | | | |
 | 7. Reporting | Not started | | | |
