@@ -155,8 +155,18 @@ The GUI asks for the user's NCBI contact email on first use and saves it only on
 that computer. The opening screen allows the saved email to be changed later.
 
 The first dialog offers two workflows. **Single sequence and one transcript**
-accepts one AS or SS sequence, one exact-version RefSeq accession such as
-`NM_002439.5`, and these scan-region presets:
+accepts one AS or SS sequence and any one of these transcript sources:
+
+- An exact-version RefSeq transcript accession such as `NM_002439.5`
+- A pasted plain sequence or one pasted FASTA record
+- A one-record local FASTA/text file
+
+Accession mode accepts transcript records `NM/XM/NR/XR`. Genomic references such
+as `NC_000005.10` are not treated as transcripts or downloaded as whole
+chromosomes. Use a transcript sequence/file instead; coordinate-based genomic
+region scanning is a separate workflow.
+
+The available scan-region presets are:
 
 - Full sequence (selected by default)
 - Seed, positions 2-8
@@ -165,8 +175,12 @@ accepts one AS or SS sequence, one exact-version RefSeq accession such as
 The single-sequence workflow shows five closest transcript windows per selected
 region by default. These windows are not filtered by the maximum-mismatch
 setting, and different region lengths are ranked separately. Results appear
-directly in a scrollable text window with **Copy all** and **New scan** buttons;
-this workflow does not create an Excel workbook.
+directly in a scrollable text window with **Copy all** and **Edit and run again**
+buttons; this workflow does not create an Excel workbook. **Edit and run again** returns
+to a form containing the previous values so small changes can be made quickly.
+The draft exists only while the app is open and is discarded on exit. The
+one-time **Refresh this transcript from NCBI** action resets after a successful
+run.
 
 **Excel sequence table** retains the batch workflow. It lets you choose AS or SS
 sequence/name columns and a transcript source: a `target_accession` column, one
@@ -191,8 +205,9 @@ later runs. Single-sequence mode automatically downloads the transcript when it
 is not already cached and can explicitly refresh it when requested. Cache-only
 offline mode remains available for Excel private-panel scans. The cache contains
 public transcript FASTA records only; oligo sequences remain local and are not
-written into the cache. `TranscriptScanData\settings.json` stores the contact
-email, and `TranscriptScanData\logs` contains rotating diagnostic logs.
+written into the cache. Pasted targets and selected local files are not copied
+into the cache. `TranscriptScanData\settings.json` stores the contact email, and
+`TranscriptScanData\logs` contains rotating diagnostic logs.
 
 #### Build a portable Windows app
 

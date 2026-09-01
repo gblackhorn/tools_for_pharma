@@ -13,6 +13,7 @@ $distributionDir = Join-Path $repoDir "dist\TranscriptScan"
 Copy-Item -LiteralPath "deployment\README_TRANSCRIPT_SCAN.txt" -Destination $distributionDir -Force
 Copy-Item -LiteralPath "deployment\VERSION.txt" -Destination $distributionDir -Force
 Copy-Item -LiteralPath "deployment\THIRD_PARTY_NOTICES.txt" -Destination $distributionDir -Force
+Copy-Item -LiteralPath "deployment\multiple_sequence_blast_template.xlsx" -Destination $distributionDir -Force
 
 Write-Host "Built portable app: $distributionDir"
 Write-Host "Run packaged verification:"

@@ -60,6 +60,7 @@ GUI_LOG_FILE_NAME = "transcript_scan.log"
 BLASTN_WORD_SIZES = {7, 11, 15}
 MEGABLAST_WORD_SIZES = {16, 20, 24, 28, 32, 48, 64}
 VERSIONED_REFSEQ_TRANSCRIPT_RE = re.compile(r"^(?:NM|XM|NR|XR)_\d+\.\d+$", re.IGNORECASE)
+VERSIONED_REFSEQ_GENOMIC_RE = re.compile(r"^(?:NC|NG|NT|NW)_\d+\.\d+$", re.IGNORECASE)
 CONTACT_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 CSV_COLUMNS = [
     "query_id",
@@ -843,6 +844,14 @@ def normalize_versioned_refseq_accession(accession: object) -> str:
     """Return an uppercase versioned RefSeq transcript accession."""
     normalized = clean_text_for_id(accession).upper()
     if not VERSIONED_REFSEQ_TRANSCRIPT_RE.fullmatch(normalized):
+        if VERSIONED_REFSEQ_GENOMIC_RE.fullmatch(normalized):
+            raise ValueError(
+                f"{normalized} is a genomic RefSeq accession, not a transcript "
+                "accession. Transcript accession mode accepts exact NM/XM/NR/XR "
+                "versions. To compare locally, paste one transcript sequence or "
+                "choose a one-record FASTA/text file. Whole-chromosome NC records "
+                "are not supported in transcript mode."
+            )
         raise ValueError(
             "Private panel accessions must include an exact RefSeq transcript "
             f"version such as NM_000041.4; received: {accession}"
@@ -1207,6 +1216,40 @@ def read_transcript_input(
     assert transcript_sequence is not None
     validate_single_transcript_record(transcript_sequence, "--target-sequence")
     return get_fasta_header(transcript_sequence) or "target_transcript", fasta_or_plain_text_to_sequence(transcript_sequence)
+
+
+def prepare_pasted_transcript_sequence(text: str, target_name: str | None = None) -> str:
+    """Return one canonical FASTA record for a pasted local transcript target."""
+    validate_single_transcript_record(text, "Pasted transcript sequence")
+    sequence = fasta_or_plain_text_to_sequence(text)
+    header = clean_text_for_id(target_name or "") or get_fasta_header(text) or "pasted_transcript"
+    return format_cached_transcript_fasta(header, sequence)
+
+
+def local_transcript_target_from_args(args: argparse.Namespace) -> TranscriptTargetResult:
+    """Build a ready target record from a pasted sequence or one local file."""
+    transcript_name, sequence = read_transcript_input(
+        transcript_sequence=args.target_sequence,
+        transcript_file=args.target_file,
+    )
+    sequence_dna = normalize_dna(sequence)
+    if args.target_file:
+        source = "local file"
+        source_path = str(args.target_file)
+    else:
+        source = "pasted sequence"
+        source_path = ""
+    return TranscriptTargetResult(
+        requested_accession=transcript_name,
+        transcript_name=transcript_name,
+        sequence_5to3=sequence,
+        sequence_length_nt=len(sequence),
+        cache_path=source_path,
+        cache_status=source,
+        exact_version_match=False,
+        sequence_sha256=hashlib.sha256(sequence_dna.encode("ascii")).hexdigest(),
+        status="ready",
+    )
 
 
 def mismatch_positions(query: str, target: str) -> tuple[int, ...]:
@@ -2154,27 +2197,64 @@ def choose_ncbi_gui_mode(root, ncbi_email: str) -> tuple[str | None, str]:
     return selected["mode"], str(selected["email"])
 
 
-def choose_single_sequence_gui_settings(root) -> dict[str, object] | None:
+def single_sequence_gui_draft(
+    previous: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Return session-only single-scan values, retaining a previous form draft."""
+    draft: dict[str, object] = {
+        "sequence_type": "AS",
+        "sequence_name": "",
+        "sequence": "",
+        "target_mode": "accession",
+        "target_accession": "",
+        "target_name": "",
+        "target_sequence": "",
+        "target_file": "",
+        "scan_regions": ["full"],
+        "max_mismatches": DEFAULT_MAX_MISMATCHES,
+        "closest": DEFAULT_SINGLE_GUI_CLOSEST_MATCHES,
+        "refresh_targets": False,
+        "cache_dir": shared_gui_transcript_cache_dir(),
+    }
+    if previous:
+        draft.update(previous)
+        draft["scan_regions"] = list(previous.get("scan_regions", ["full"]))
+    if draft.get("target_mode") not in {"accession", "paste", "file"}:
+        draft["target_mode"] = "accession"
+    return draft
+
+
+def choose_single_sequence_gui_settings(
+    root,
+    previous: dict[str, object] | None = None,
+) -> dict[str, object] | None:
     """Collect one local AS/SS-versus-transcript scan from the user."""
     import tkinter as tk
-    from tkinter import messagebox, ttk
+    from tkinter import filedialog, messagebox, ttk
 
     selected: dict[str, object] = {}
-    cache_dir = shared_gui_transcript_cache_dir()
+    draft = single_sequence_gui_draft(previous)
+    cache_dir = Path(draft.get("cache_dir") or shared_gui_transcript_cache_dir())
+    scan_region_values = {str(value) for value in draft["scan_regions"]}
+
     window = tk.Toplevel(root)
     window.title("Single sequence transcript scan")
-    window.resizable(False, False)
+    window.minsize(760, 760)
+    window.resizable(True, True)
     window.columnconfigure(1, weight=1)
 
-    sequence_type_var = tk.StringVar(value="AS")
-    sequence_name_var = tk.StringVar()
-    accession_var = tk.StringVar()
-    full_region_var = tk.BooleanVar(value=True)
-    seed_region_var = tk.BooleanVar(value=False)
-    core_region_var = tk.BooleanVar(value=False)
-    max_mismatches_var = tk.StringVar(value=str(DEFAULT_MAX_MISMATCHES))
-    closest_var = tk.StringVar(value=str(DEFAULT_SINGLE_GUI_CLOSEST_MATCHES))
-    refresh_var = tk.BooleanVar(value=False)
+    sequence_type_var = tk.StringVar(value=str(draft.get("sequence_type") or "AS"))
+    sequence_name_var = tk.StringVar(value=str(draft.get("sequence_name") or ""))
+    target_mode_var = tk.StringVar(value=str(draft.get("target_mode") or "accession"))
+    accession_var = tk.StringVar(value=str(draft.get("target_accession") or ""))
+    target_name_var = tk.StringVar(value=str(draft.get("target_name") or ""))
+    target_file_var = tk.StringVar(value=str(draft.get("target_file") or ""))
+    full_region_var = tk.BooleanVar(value="full" in scan_region_values)
+    seed_region_var = tk.BooleanVar(value="seed:2-8" in scan_region_values)
+    core_region_var = tk.BooleanVar(value="core:2-18" in scan_region_values)
+    max_mismatches_var = tk.StringVar(value=str(draft["max_mismatches"]))
+    closest_var = tk.StringVar(value=str(draft["closest"]))
+    refresh_var = tk.BooleanVar(value=bool(draft.get("refresh_targets", False)))
 
     ttk.Label(window, text="Sequence type").grid(
         row=0, column=0, padx=16, pady=(16, 8), sticky="w"
@@ -2190,37 +2270,92 @@ def choose_single_sequence_gui_settings(root) -> dict[str, object] | None:
     ttk.Label(window, text="Sequence name (optional)").grid(
         row=1, column=0, padx=16, pady=8, sticky="w"
     )
-    ttk.Entry(window, textvariable=sequence_name_var, width=48).grid(
+    ttk.Entry(window, textvariable=sequence_name_var, width=52).grid(
         row=1, column=1, padx=16, pady=8, sticky="ew"
     )
 
     ttk.Label(window, text="Sequence, 5' to 3'").grid(
         row=2, column=0, padx=16, pady=8, sticky="nw"
     )
-    sequence_text = tk.Text(window, width=50, height=4, wrap="word")
+    sequence_text = tk.Text(window, width=56, height=4, wrap="word")
     sequence_text.grid(row=2, column=1, padx=16, pady=8, sticky="ew")
+    sequence_text.insert("1.0", str(draft.get("sequence") or ""))
 
-    ttk.Label(window, text="Exact RefSeq transcript").grid(
-        row=3, column=0, padx=16, pady=8, sticky="w"
+    target_frame = ttk.LabelFrame(window, text="Transcript target source")
+    target_frame.grid(row=3, column=0, columnspan=2, padx=16, pady=8, sticky="nsew")
+    target_frame.columnconfigure(1, weight=1)
+
+    ttk.Radiobutton(
+        target_frame,
+        text="Download/reuse a RefSeq transcript accession",
+        variable=target_mode_var,
+        value="accession",
+    ).grid(row=0, column=0, columnspan=3, padx=12, pady=(10, 4), sticky="w")
+    ttk.Label(target_frame, text="Exact NM/XM/NR/XR version").grid(
+        row=1, column=0, padx=(28, 8), pady=4, sticky="w"
     )
-    ttk.Entry(window, textvariable=accession_var, width=30).grid(
-        row=3, column=1, padx=16, pady=8, sticky="w"
+    accession_entry = ttk.Entry(target_frame, textvariable=accession_var, width=32)
+    accession_entry.grid(row=1, column=1, padx=8, pady=4, sticky="ew")
+    ttk.Label(target_frame, text="Example: NM_002439.5").grid(
+        row=2, column=1, padx=8, pady=(0, 8), sticky="w"
     )
-    ttk.Label(
-        window,
-        text="Include the version, for example NM_002439.5.",
-    ).grid(row=4, column=1, padx=16, pady=(0, 8), sticky="w")
+
+    ttk.Radiobutton(
+        target_frame,
+        text="Paste one transcript sequence (plain sequence or one FASTA record)",
+        variable=target_mode_var,
+        value="paste",
+    ).grid(row=3, column=0, columnspan=3, padx=12, pady=(8, 4), sticky="w")
+    ttk.Label(target_frame, text="Target name (optional)").grid(
+        row=4, column=0, padx=(28, 8), pady=4, sticky="w"
+    )
+    target_name_entry = ttk.Entry(target_frame, textvariable=target_name_var, width=32)
+    target_name_entry.grid(row=4, column=1, padx=8, pady=4, sticky="ew")
+    target_sequence_text = tk.Text(target_frame, width=56, height=6, wrap="word")
+    target_sequence_text.grid(
+        row=5,
+        column=0,
+        columnspan=3,
+        padx=(28, 12),
+        pady=(4, 8),
+        sticky="ew",
+    )
+    target_sequence_text.insert("1.0", str(draft.get("target_sequence") or ""))
+
+    ttk.Radiobutton(
+        target_frame,
+        text="Load one transcript FASTA/text file",
+        variable=target_mode_var,
+        value="file",
+    ).grid(row=6, column=0, columnspan=3, padx=12, pady=(8, 4), sticky="w")
+    target_file_entry = ttk.Entry(target_frame, textvariable=target_file_var, width=42)
+    target_file_entry.grid(row=7, column=0, columnspan=2, padx=(28, 8), pady=(4, 10), sticky="ew")
+
+    def choose_target_file() -> None:
+        path = filedialog.askopenfilename(
+            parent=window,
+            title="Select one transcript FASTA or text file",
+            filetypes=[
+                ("Sequence text files", "*.txt *.fa *.fasta *.fna *.ffn"),
+                ("All files", "*.*"),
+            ],
+        )
+        if path:
+            target_file_var.set(path)
+            target_mode_var.set("file")
+            update_target_controls()
+
+    browse_button = ttk.Button(target_frame, text="Browse", command=choose_target_file)
+    browse_button.grid(row=7, column=2, padx=(0, 12), pady=(4, 10), sticky="e")
 
     ttk.Label(window, text="Scan regions").grid(
-        row=5, column=0, padx=16, pady=8, sticky="nw"
+        row=4, column=0, padx=16, pady=8, sticky="nw"
     )
     region_frame = ttk.Frame(window)
-    region_frame.grid(row=5, column=1, padx=16, pady=8, sticky="w")
-    ttk.Checkbutton(
-        region_frame,
-        text="Full sequence",
-        variable=full_region_var,
-    ).grid(row=0, column=0, padx=(0, 16), sticky="w")
+    region_frame.grid(row=4, column=1, padx=16, pady=8, sticky="w")
+    ttk.Checkbutton(region_frame, text="Full sequence", variable=full_region_var).grid(
+        row=0, column=0, padx=(0, 16), sticky="w"
+    )
     ttk.Checkbutton(
         region_frame,
         text="Seed (positions 2-8)",
@@ -2233,41 +2368,42 @@ def choose_single_sequence_gui_settings(root) -> dict[str, object] | None:
     ).grid(row=0, column=2, sticky="w")
 
     ttk.Label(window, text="Maximum mismatches").grid(
-        row=6, column=0, padx=16, pady=8, sticky="w"
+        row=5, column=0, padx=16, pady=8, sticky="w"
     )
     ttk.Entry(window, textvariable=max_mismatches_var, width=8).grid(
-        row=6, column=1, padx=16, pady=8, sticky="w"
+        row=5, column=1, padx=16, pady=8, sticky="w"
     )
 
     ttk.Label(window, text="Closest windows per region").grid(
-        row=7, column=0, padx=16, pady=8, sticky="w"
+        row=6, column=0, padx=16, pady=8, sticky="w"
     )
     ttk.Entry(window, textvariable=closest_var, width=8).grid(
-        row=7, column=1, padx=16, pady=8, sticky="w"
+        row=6, column=1, padx=16, pady=8, sticky="w"
     )
 
     option_frame = ttk.Frame(window)
-    option_frame.grid(row=8, column=0, columnspan=2, padx=16, pady=8, sticky="w")
+    option_frame.grid(row=7, column=0, columnspan=2, padx=16, pady=8, sticky="w")
     ttk.Label(
         option_frame,
         text=(
-            "Cache behavior: use the saved transcript when available; "
-            "download it automatically when missing."
+            "Accession mode uses the saved transcript when available and downloads "
+            "it automatically when missing. Pasted and file targets stay local."
         ),
-        wraplength=560,
+        wraplength=680,
     ).grid(row=0, column=0, sticky="w")
-    ttk.Checkbutton(
+    refresh_check = ttk.Checkbutton(
         option_frame,
-        text="Refresh this transcript from NCBI",
+        text="Refresh this transcript from NCBI once",
         variable=refresh_var,
-    ).grid(row=1, column=0, pady=(4, 0), sticky="w")
+    )
+    refresh_check.grid(row=1, column=0, pady=(4, 0), sticky="w")
 
     cache_frame = ttk.Frame(window)
-    cache_frame.grid(row=9, column=0, columnspan=2, padx=16, pady=8, sticky="ew")
+    cache_frame.grid(row=8, column=0, columnspan=2, padx=16, pady=8, sticky="ew")
     ttk.Label(
         cache_frame,
         text=f"Shared transcript cache: {cache_dir}",
-        wraplength=520,
+        wraplength=560,
     ).grid(row=0, column=0, padx=(0, 8), sticky="w")
 
     def open_cache_folder() -> None:
@@ -2283,21 +2419,51 @@ def choose_single_sequence_gui_settings(root) -> dict[str, object] | None:
     ttk.Label(
         window,
         text=(
-            "Privacy: only the public transcript accession may be sent to NCBI. "
-            "The entered oligo sequence stays on this computer."
+            "Privacy: the oligo sequence and any pasted/local transcript stay on "
+            "this computer. In accession mode, only accession/contact metadata are "
+            "sent to NCBI. Form values are discarded when the app closes."
         ),
-        wraplength=560,
-    ).grid(row=10, column=0, columnspan=2, padx=16, pady=(4, 8), sticky="w")
+        wraplength=680,
+    ).grid(row=9, column=0, columnspan=2, padx=16, pady=(4, 8), sticky="w")
 
     buttons = ttk.Frame(window)
-    buttons.grid(row=11, column=0, columnspan=2, padx=16, pady=(8, 16), sticky="e")
+    buttons.grid(row=10, column=0, columnspan=2, padx=16, pady=(8, 16), sticky="e")
+
+    def update_target_controls() -> None:
+        mode = target_mode_var.get()
+        accession_entry.configure(state="normal" if mode == "accession" else "disabled")
+        target_name_entry.configure(state="normal" if mode == "paste" else "disabled")
+        target_sequence_text.configure(state="normal" if mode == "paste" else "disabled")
+        target_file_entry.configure(state="normal" if mode == "file" else "disabled")
+        browse_button.configure(state="normal" if mode == "file" else "disabled")
+        refresh_check.configure(state="normal" if mode == "accession" else "disabled")
+
+    target_mode_var.trace_add("write", lambda *_args: update_target_controls())
+    update_target_controls()
 
     def use_settings() -> None:
         try:
             sequence = normalize_rna(sequence_text.get("1.0", "end").strip())
-            if not sequence:
-                raise ValueError("Enter one AS or SS sequence.")
-            accession = normalize_versioned_refseq_accession(accession_var.get())
+            mode = target_mode_var.get()
+            if mode == "accession":
+                accession = normalize_versioned_refseq_accession(accession_var.get())
+            elif mode == "paste":
+                prepare_pasted_transcript_sequence(
+                    target_sequence_text.get("1.0", "end").strip(),
+                    target_name_var.get(),
+                )
+                accession = accession_var.get().strip()
+            elif mode == "file":
+                target_file = Path(target_file_var.get().strip())
+                if not target_file.exists() or not target_file.is_file():
+                    raise ValueError(f"Transcript file does not exist: {target_file}")
+                file_text = target_file.read_text(encoding="utf-8-sig")
+                validate_single_transcript_record(file_text, str(target_file))
+                fasta_or_plain_text_to_sequence(file_text)
+                accession = accession_var.get().strip()
+            else:
+                raise ValueError("Choose a transcript target source.")
+
             scan_regions = []
             if full_region_var.get():
                 scan_regions.append("full")
@@ -2315,20 +2481,24 @@ def choose_single_sequence_gui_settings(root) -> dict[str, object] | None:
             closest = int(closest_var.get())
             if closest < 1:
                 raise ValueError("Closest windows must be 1 or greater.")
-        except ValueError as error:
+        except (OSError, UnicodeError, ValueError) as error:
             messagebox.showerror("Invalid settings", str(error), parent=window)
             return
 
         selected.update(
             {
                 "sequence_type": sequence_type_var.get(),
-                "sequence_name": sequence_name_var.get().strip() or None,
+                "sequence_name": sequence_name_var.get().strip(),
                 "sequence": sequence,
+                "target_mode": mode,
                 "target_accession": accession,
+                "target_name": target_name_var.get().strip(),
+                "target_sequence": target_sequence_text.get("1.0", "end").strip(),
+                "target_file": target_file_var.get().strip(),
                 "scan_regions": scan_regions,
                 "max_mismatches": max_mismatches,
                 "closest": closest,
-                "refresh_targets": refresh_var.get(),
+                "refresh_targets": refresh_var.get() if mode == "accession" else False,
                 "cache_dir": cache_dir,
             }
         )
@@ -2352,12 +2522,10 @@ def single_sequence_gui_args(settings: dict[str, object]) -> argparse.Namespace:
     sequence_type = normalize_sequence_type(str(settings["sequence_type"]))
     sequence_flag = "--as-sequence" if sequence_type == "AS" else "--ss-sequence"
     name_flag = "--as-name" if sequence_type == "AS" else "--ss-name"
+    target_mode = str(settings.get("target_mode") or "accession")
     argv = [
         sequence_flag,
         str(settings["sequence"]),
-        "--private-panel",
-        "--target-accession",
-        str(settings["target_accession"]),
         "--cache-dir",
         str(settings.get("cache_dir") or shared_gui_transcript_cache_dir()),
         "--email",
@@ -2367,11 +2535,36 @@ def single_sequence_gui_args(settings: dict[str, object]) -> argparse.Namespace:
         "--closest",
         str(settings.get("closest", DEFAULT_SINGLE_GUI_CLOSEST_MATCHES)),
     ]
+    if target_mode == "accession":
+        argv.extend(
+            [
+                "--private-panel",
+                "--target-accession",
+                normalize_versioned_refseq_accession(settings.get("target_accession", "")),
+            ]
+        )
+    elif target_mode == "paste":
+        argv.extend(
+            [
+                "--target-sequence",
+                prepare_pasted_transcript_sequence(
+                    str(settings.get("target_sequence") or ""),
+                    str(settings.get("target_name") or ""),
+                ),
+            ]
+        )
+    elif target_mode == "file":
+        target_file = Path(str(settings.get("target_file") or ""))
+        if not str(settings.get("target_file") or "").strip():
+            raise ValueError("Choose one transcript FASTA/text file.")
+        argv.extend(["--target-file", str(target_file)])
+    else:
+        raise ValueError(f"Unsupported single-sequence target mode: {target_mode}")
     if settings.get("sequence_name"):
         argv.extend([name_flag, str(settings["sequence_name"])])
     for region in settings.get("scan_regions", ["full"]):
         argv.extend(["--scan-region", str(region)])
-    if settings.get("refresh_targets"):
+    if target_mode == "accession" and settings.get("refresh_targets"):
         argv.append("--refresh-targets")
     return build_parser().parse_args(argv)
 
@@ -2382,24 +2575,36 @@ def run_single_sequence_scan(
     progress_callback: Callable[[int, int, str, str], None] | None = None,
     client: NcbiHttpClient | None = None,
 ) -> tuple[list[AntisenseQuery], list[AntisenseRegion], PrivatePanelScanResult]:
-    """Run one private local query against one exact-version transcript."""
-    accessions = panel_accessions_from_args(args)
-    if len(accessions) != 1:
-        raise ValueError("Single-sequence mode requires exactly one transcript accession.")
-    targets = retrieve_transcript_targets(
-        accessions,
-        email=args.email,
-        tool=args.tool,
-        cache_dir=private_panel_cache_dir(args),
-        offline=False,
-        refresh=bool(getattr(args, "refresh_targets", False)),
-        request_seconds=args.request_seconds,
-        client=client,
-        progress_callback=progress_callback,
-    )
+    """Run one private local query against one accession, pasted, or file target."""
+    accessions = target_accession_values(args.target_accession)
+    if accessions:
+        if len(accessions) != 1:
+            raise ValueError("Single-sequence mode requires exactly one transcript accession.")
+        normalized_accessions = [normalize_versioned_refseq_accession(accessions[0])]
+        targets = retrieve_transcript_targets(
+            normalized_accessions,
+            email=args.email,
+            tool=args.tool,
+            cache_dir=private_panel_cache_dir(args),
+            offline=False,
+            refresh=bool(getattr(args, "refresh_targets", False)),
+            request_seconds=args.request_seconds,
+            client=client,
+            progress_callback=progress_callback,
+        )
+    else:
+        targets = [local_transcript_target_from_args(args)]
+        if progress_callback:
+            progress_callback(
+                1,
+                1,
+                targets[0].transcript_name,
+                targets[0].cache_status,
+            )
     target = targets[0]
     if target.status != "ready":
-        raise ValueError(target.error or f"Transcript {accessions[0]} could not be prepared.")
+        target_label = accessions[0] if accessions else target.transcript_name
+        raise ValueError(target.error or f"Transcript {target_label} could not be prepared.")
 
     queries = args_antisense_queries(args)
     if len(queries) != 1:
@@ -2431,11 +2636,19 @@ def format_single_sequence_scan_result(
     output.write(f"Sequence type: {normalize_sequence_type(query.sequence_type)}\n")
     output.write(f"Sequence name: {query.name}\n")
     output.write(f"Sequence 5'->3': {normalize_rna(query.sequence_5to3)}\n")
-    output.write(f"Transcript accession: {target.retrieved_accession}\n")
+    if target.retrieved_accession:
+        output.write(f"Transcript accession: {target.retrieved_accession}\n")
     output.write(f"Transcript: {target.transcript_name}\n")
     output.write(f"Transcript length: {target.sequence_length_nt} nt\n")
     output.write(f"Transcript source: {target.cache_status}\n")
-    output.write(f"Cache file: {target.cache_path}\n")
+    if target.cache_path:
+        source_label = "Cache file" if target.retrieved_accession else "Target file"
+        output.write(f"{source_label}: {target.cache_path}\n")
+    output.write(
+        "NCBI transcript retrieval: "
+        + ("Used accession/cache workflow" if target.retrieved_accession else "Not used")
+        + "\n"
+    )
     output.write("Guide sequence sent to NCBI: No\n")
     output.write(
         "Scan regions: " + ", ".join(region.name for region in scan_regions) + "\n"
@@ -2522,7 +2735,7 @@ def show_single_sequence_result_gui(root, result_text: str) -> bool:
     ttk.Button(buttons, text="Copy all", command=copy_all).grid(
         row=0, column=0, padx=(0, 8)
     )
-    ttk.Button(buttons, text="New scan", command=request_new_scan).grid(
+    ttk.Button(buttons, text="Edit and run again", command=request_new_scan).grid(
         row=0, column=1, padx=(0, 8)
     )
     ttk.Button(buttons, text="Close", command=window.destroy).grid(row=0, column=2)
@@ -2537,15 +2750,26 @@ def show_single_sequence_result_gui(root, result_text: str) -> bool:
 def run_single_sequence_gui(root, ncbi_email: str) -> int:
     """Run the one-sequence/one-transcript private local GUI workflow."""
     import tkinter as tk
-    from tkinter import ttk
+    from tkinter import messagebox, ttk
 
+    draft = single_sequence_gui_draft()
     while True:
-        settings = choose_single_sequence_gui_settings(root)
+        settings = choose_single_sequence_gui_settings(root, draft)
         if not settings:
             return 0
         settings["email"] = ncbi_email
-        args = single_sequence_gui_args(settings)
-        validate_runtime_args(args)
+        draft = {key: value for key, value in settings.items() if key != "email"}
+        try:
+            args = single_sequence_gui_args(settings)
+            validate_runtime_args(args)
+        except Exception as error:
+            logging.exception("Invalid single-sequence scan settings")
+            messagebox.showerror(
+                "Single sequence transcript scan failed",
+                str(error),
+                parent=root,
+            )
+            continue
 
         progress_window = tk.Toplevel(root)
         progress_window.title("Single sequence transcript scan")
@@ -2573,12 +2797,21 @@ def run_single_sequence_gui(root, ncbi_email: str) -> int:
             progress_window.update()
 
         try:
-            queries, scan_regions, result = run_single_sequence_scan(
-                args,
-                progress_callback=update_progress,
+            try:
+                queries, scan_regions, result = run_single_sequence_scan(
+                    args,
+                    progress_callback=update_progress,
+                )
+            finally:
+                progress_window.destroy()
+        except Exception as error:
+            logging.exception("Single-sequence transcript scan failed")
+            messagebox.showerror(
+                "Single sequence transcript scan failed",
+                f"{error}\n\nYour form entries have been retained.",
+                parent=root,
             )
-        finally:
-            progress_window.destroy()
+            continue
 
         result_text = format_single_sequence_scan_result(
             args,
@@ -2586,6 +2819,7 @@ def run_single_sequence_gui(root, ncbi_email: str) -> int:
             scan_regions,
             result,
         )
+        draft["refresh_targets"] = False
         if not show_single_sequence_result_gui(root, result_text):
             return 0
 

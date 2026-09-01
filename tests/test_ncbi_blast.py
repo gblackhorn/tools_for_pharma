@@ -43,6 +43,7 @@ from tools_for_pharma.oligo.ncbi_blast import (
     scan_antisense_against_transcript,
     scan_sense_against_transcript,
     shared_gui_transcript_cache_dir,
+    single_sequence_gui_draft,
     single_sequence_gui_args,
     transcript_match_rows,
     transcript_matches_to_csv,
@@ -65,6 +66,17 @@ def test_ncbi_contact_email_has_no_default_and_requires_valid_input() -> None:
         ncbi_blast.require_email("not-an-email")
 
     assert ncbi_blast.require_email(" user@example.com ") == "user@example.com"
+
+
+def test_nc_genomic_accession_error_explains_local_target_alternatives() -> None:
+    with pytest.raises(ValueError) as error_info:
+        ncbi_blast.normalize_versioned_refseq_accession("NC_000005.10")
+
+    message = str(error_info.value)
+    assert "genomic RefSeq accession" in message
+    assert "not a transcript accession" in message
+    assert "paste one transcript sequence" in message
+    assert "one-record FASTA/text file" in message
 
 
 def test_portable_gui_settings_and_cache_use_local_data_subfolder(
@@ -1374,6 +1386,104 @@ def test_single_sequence_gui_args_use_presets_shared_cache_and_local_workflow(tm
     assert args.offline is False
     assert args.blast is False
     assert args.result_workbook is None
+
+
+def test_single_sequence_gui_draft_retains_session_values_without_mutating_source(
+    tmp_path,
+) -> None:
+    previous = {
+        "sequence_type": "SS",
+        "sequence_name": "SS_lead",
+        "sequence": "AUGC",
+        "target_mode": "paste",
+        "target_accession": "NM_000001.1",
+        "target_name": "manual transcript",
+        "target_sequence": ">manual\nAUGC",
+        "target_file": str(tmp_path / "target.fasta"),
+        "scan_regions": ["full", "seed:2-8"],
+        "max_mismatches": 1,
+        "closest": 3,
+        "refresh_targets": True,
+    }
+
+    draft = single_sequence_gui_draft(previous)
+    draft["scan_regions"].append("core:2-18")
+
+    assert draft["sequence_type"] == "SS"
+    assert draft["sequence"] == "AUGC"
+    assert draft["target_mode"] == "paste"
+    assert draft["target_accession"] == "NM_000001.1"
+    assert draft["target_name"] == "manual transcript"
+    assert draft["target_sequence"] == ">manual\nAUGC"
+    assert draft["target_file"] == str(tmp_path / "target.fasta")
+    assert previous["scan_regions"] == ["full", "seed:2-8"]
+
+
+def test_single_sequence_pasted_target_runs_locally_without_email_or_cache(tmp_path) -> None:
+    args = single_sequence_gui_args(
+        {
+            "sequence_type": "SS",
+            "sequence_name": "SS_1",
+            "sequence": "AUGC",
+            "target_mode": "paste",
+            "target_name": "manual transcript",
+            "target_sequence": "CCCAUGCUUU",
+            "scan_regions": ["full"],
+            "max_mismatches": 0,
+            "closest": 2,
+            "refresh_targets": True,
+            "cache_dir": tmp_path / "cache",
+            "email": "",
+        }
+    )
+    validate_runtime_args(args)
+
+    queries, scan_regions, result = run_single_sequence_scan(args)
+    text = format_single_sequence_scan_result(args, queries, scan_regions, result)
+
+    assert args.private_panel is False
+    assert args.refresh_targets is False
+    assert args.target_accession is None
+    assert args.target_file is None
+    assert result.targets[0].transcript_name == "manual transcript"
+    assert result.targets[0].cache_status == "pasted sequence"
+    assert result.targets[0].cache_path == ""
+    assert result.summaries[0].exact_match_count == 1
+    assert "Transcript source: pasted sequence" in text
+    assert "NCBI transcript retrieval: Not used" in text
+    assert "Transcript accession:" not in text
+    assert not (tmp_path / "cache").exists()
+
+
+def test_single_sequence_file_target_runs_locally_and_reports_file(tmp_path) -> None:
+    target_file = tmp_path / "manual_target.fasta"
+    target_file.write_text(">local target\nGCAU\n", encoding="utf-8")
+    args = single_sequence_gui_args(
+        {
+            "sequence_type": "AS",
+            "sequence_name": "AS_1",
+            "sequence": "AUGC",
+            "target_mode": "file",
+            "target_file": target_file,
+            "scan_regions": ["full"],
+            "max_mismatches": 0,
+            "closest": 1,
+            "cache_dir": tmp_path / "cache",
+            "email": "",
+        }
+    )
+    validate_runtime_args(args)
+
+    queries, scan_regions, result = run_single_sequence_scan(args)
+    text = format_single_sequence_scan_result(args, queries, scan_regions, result)
+
+    assert args.private_panel is False
+    assert result.targets[0].transcript_name == "local target"
+    assert result.targets[0].cache_status == "local file"
+    assert result.targets[0].cache_path == str(target_file)
+    assert result.summaries[0].exact_match_count == 1
+    assert f"Target file: {target_file}" in text
+    assert "NCBI transcript retrieval: Not used" in text
 
 
 def test_single_sequence_gui_scan_reuses_cache_and_formats_direct_text_output(

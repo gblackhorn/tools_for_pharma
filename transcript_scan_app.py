@@ -15,7 +15,7 @@ from tools_for_pharma.oligo.ncbi_blast import (
 
 
 APP_NAME = "Transcript Scan"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 
 class _LoggerStream:
