@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
+from urllib.error import URLError
 
 import tools_for_pharma.oligo.ncbi_blast as ncbi_blast
 
@@ -625,7 +626,7 @@ def test_megablast_rejects_other_incompatible_word_sizes() -> None:
         validate_runtime_args(args)
 
 
-def test_remote_blast_warns_before_mocked_submission(monkeypatch, capsys) -> None:
+def test_remote_blast_warns_before_mocked_submission(capsys) -> None:
     class FakeBlastClient:
         def __init__(self, **_kwargs) -> None:
             pass
@@ -639,7 +640,6 @@ def test_remote_blast_warns_before_mocked_submission(monkeypatch, capsys) -> Non
         def fetch_csv(self, *_args, **_kwargs) -> str:
             return ""
 
-    monkeypatch.setattr(ncbi_blast, "NcbiBlastClient", FakeBlastClient)
     args = build_parser().parse_args(
         [
             "--as-sequence",
@@ -654,6 +654,7 @@ def test_remote_blast_warns_before_mocked_submission(monkeypatch, capsys) -> Non
     results = run_blast_batches(
         args,
         [AntisenseQuery("A B", "AUGC"), AntisenseQuery("A_B", "CCGA")],
+        client_factory=FakeBlastClient,
     )
 
     captured = capsys.readouterr()
@@ -686,21 +687,27 @@ def test_mocked_blast_client_submit_poll_fetch_lifecycle() -> None:
     assert client.requests[0]["QUERY"] == ">oligo_query\nATGC"
 
 
-def test_ncbi_http_failure_is_reported_without_real_network(monkeypatch) -> None:
+def test_ncbi_http_failure_is_reported_without_real_network() -> None:
     def fail_urlopen(*_args, **_kwargs):
-        raise ncbi_blast.URLError("offline")
+        raise URLError("offline")
 
-    monkeypatch.setattr(ncbi_blast, "urlopen", fail_urlopen)
-    client = NcbiHttpClient(email="test@example.com", request_seconds=0)
+    client = NcbiHttpClient(
+        email="test@example.com",
+        request_seconds=0,
+        opener=fail_urlopen,
+    )
 
     with pytest.raises(ValueError, match="NCBI request failed: offline"):
         client.get_text("https://example.invalid", {"id": "NM_TEST"})
 
 
-def test_wait_for_blast_result_times_out_without_real_network(monkeypatch) -> None:
-    client = NcbiBlastClient(email="test@example.com", request_seconds=0)
+def test_wait_for_blast_result_times_out_without_real_network() -> None:
     monotonic_values = iter([0.0, 2.0])
-    monkeypatch.setattr(ncbi_blast.time, "monotonic", lambda: next(monotonic_values))
+    client = NcbiBlastClient(
+        email="test@example.com",
+        request_seconds=0,
+        monotonic=lambda: next(monotonic_values),
+    )
 
     with pytest.raises(TimeoutError, match="Timed out waiting"):
         client.wait_for_result("RID_TEST", timeout_seconds=1)

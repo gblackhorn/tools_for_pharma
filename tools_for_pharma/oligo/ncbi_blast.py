@@ -29,12 +29,38 @@ import re
 import sys
 import time
 from typing import Callable, Iterable
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 from tools_for_pharma.oligo.core import get_complementary_sequence
+from tools_for_pharma.oligo.ncbi_transport import (
+    BLAST_URL,
+    BLASTN_WORD_SIZES,
+    DEFAULT_DATABASE,
+    DEFAULT_EMAIL,
+    DEFAULT_EXPECT,
+    DEFAULT_HITLIST_SIZE,
+    DEFAULT_MEGABLAST_WORD_SIZE,
+    DEFAULT_POLL_SECONDS,
+    DEFAULT_PROGRAM,
+    DEFAULT_REQUEST_SECONDS,
+    DEFAULT_TOOL,
+    DEFAULT_WORD_SIZE,
+    EFETCH_URL,
+    MEGABLAST_WORD_SIZES,
+    BlastSubmission,
+    NcbiBlastClient,
+    NcbiHttpClient,
+    efetch_fasta_params,
+    parse_blast_field,
+    require_email,
+    resolve_blast_word_size,
+)
 from tools_for_pharma.oligo.transcript import fasta_or_plain_text_to_sequence, get_fasta_header
+from tools_for_pharma.oligo.transcript_accessions import (
+    VERSIONED_REFSEQ_GENOMIC_RE,
+    VERSIONED_REFSEQ_TRANSCRIPT_RE,
+    extract_refseq_accession_from_header,
+    normalize_versioned_refseq_accession,
+)
 from tools_for_pharma.sequence.comparison import mismatch_positions_1based
 from tools_for_pharma.sequence.fasta import (
     FastaRecord,
@@ -48,30 +74,13 @@ from tools_for_pharma.sequence.nucleotides import (
 from tools_for_pharma.shared.excel_utils import list_excel_sheets
 
 
-BLAST_URL = "https://blast.ncbi.nlm.nih.gov/Blast.cgi"
-EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-DEFAULT_TOOL = "tools_for_pharma_oligo"
-DEFAULT_EMAIL = ""
-DEFAULT_DATABASE = "refseq_rna"
-DEFAULT_PROGRAM = "blastn"
-DEFAULT_EXPECT = "1000"
-DEFAULT_WORD_SIZE = 7
-DEFAULT_MEGABLAST_WORD_SIZE = 28
-DEFAULT_HITLIST_SIZE = 50
 DEFAULT_MAX_MISMATCHES = 3
 DEFAULT_CLOSEST_MATCHES = 10
 DEFAULT_SINGLE_GUI_CLOSEST_MATCHES = 5
 DEFAULT_BATCH_BASES = 1000
-DEFAULT_POLL_SECONDS = 75
-DEFAULT_REQUEST_SECONDS = 15
 APP_DATA_DIR_NAME = "TranscriptScanData"
 GUI_SETTINGS_FILE_NAME = "settings.json"
 GUI_LOG_FILE_NAME = "transcript_scan.log"
-BLASTN_WORD_SIZES = {7, 11, 15}
-MEGABLAST_WORD_SIZES = {16, 20, 24, 28, 32, 48, 64}
-VERSIONED_REFSEQ_TRANSCRIPT_RE = re.compile(r"^(?:NM|XM|NR|XR)_\d+\.\d+$", re.IGNORECASE)
-VERSIONED_REFSEQ_GENOMIC_RE = re.compile(r"^(?:NC|NG|NT|NW)_\d+\.\d+$", re.IGNORECASE)
-CONTACT_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 CSV_COLUMNS = [
     "query_id",
     "subject_id",
@@ -202,14 +211,6 @@ class PrivatePanelScanResult:
 
 
 @dataclass(frozen=True)
-class BlastSubmission:
-    """NCBI BLAST request metadata returned after CMD=Put."""
-
-    rid: str
-    rtoe_seconds: int | None
-
-
-@dataclass(frozen=True)
 class BlastBatchResult:
     """One completed BLAST batch and its returned CSV text."""
 
@@ -287,194 +288,6 @@ def multi_fasta(records: Iterable[AntisenseQuery]) -> str:
         fasta_record(record.blast_query_id, record.sequence_5to3)
         for record in prepared
     )
-
-
-def resolve_blast_word_size(word_size: int, megablast: bool) -> int:
-    """Return a BLAST-mode-compatible word size or raise a clear error."""
-    if megablast and word_size == DEFAULT_WORD_SIZE:
-        return DEFAULT_MEGABLAST_WORD_SIZE
-    allowed = MEGABLAST_WORD_SIZES if megablast else BLASTN_WORD_SIZES
-    if word_size not in allowed:
-        mode = "megablast" if megablast else "blastn"
-        allowed_text = ", ".join(str(value) for value in sorted(allowed))
-        raise ValueError(
-            f"Invalid --word-size {word_size} for {mode}. "
-            f"Allowed values: {allowed_text}."
-        )
-    return word_size
-
-
-def require_email(email: str | None) -> str:
-    """Return a usable NCBI contact email or raise a clear error."""
-    normalized = clean_text_for_id(email or DEFAULT_EMAIL)
-    if not CONTACT_EMAIL_RE.fullmatch(normalized):
-        raise ValueError(
-            "A valid contact email is required before downloading transcripts "
-            "from NCBI."
-        )
-    return normalized
-
-
-class NcbiHttpClient:
-    """Small HTTP client with NCBI-friendly request spacing."""
-
-    def __init__(
-        self,
-        email: str,
-        tool: str = DEFAULT_TOOL,
-        request_seconds: int = DEFAULT_REQUEST_SECONDS,
-    ) -> None:
-        self.email = require_email(email)
-        self.tool = tool
-        self.request_seconds = request_seconds
-        self._last_request_time = 0.0
-
-    def _wait_if_needed(self) -> None:
-        elapsed = time.monotonic() - self._last_request_time
-        wait_seconds = self.request_seconds - elapsed
-        if wait_seconds > 0:
-            time.sleep(wait_seconds)
-
-    def get_text(self, url: str, params: dict[str, object]) -> str:
-        self._wait_if_needed()
-        clean_params = {
-            key: value
-            for key, value in params.items()
-            if value is not None and value != ""
-        }
-        query = urlencode(clean_params)
-        request = Request(
-            f"{url}?{query}",
-            headers={"User-Agent": f"{self.tool}/1.0 ({self.email})"},
-        )
-        try:
-            with urlopen(request, timeout=120) as response:
-                text = response.read().decode("utf-8", errors="replace")
-        except HTTPError as error:
-            raise ValueError(f"NCBI HTTP error {error.code}: {error.reason}") from error
-        except URLError as error:
-            raise ValueError(f"NCBI request failed: {error.reason}") from error
-        finally:
-            self._last_request_time = time.monotonic()
-        return text
-
-
-class NcbiBlastClient(NcbiHttpClient):
-    """Client for the NCBI BLAST Common URL API."""
-
-    def submit_blastn(
-        self,
-        query_sequence: str | None = None,
-        query_fasta: str | None = None,
-        database: str = DEFAULT_DATABASE,
-        expect: str = DEFAULT_EXPECT,
-        word_size: int = DEFAULT_WORD_SIZE,
-        hitlist_size: int = DEFAULT_HITLIST_SIZE,
-        megablast: bool = False,
-        short_query_adjust: bool = True,
-    ) -> BlastSubmission:
-        word_size = resolve_blast_word_size(word_size, megablast)
-        if query_fasta is None:
-            if query_sequence is None:
-                raise ValueError("Provide query_sequence or query_fasta for BLAST submission.")
-            query_fasta = fasta_record("oligo_query", query_sequence)
-        params = {
-            "CMD": "Put",
-            "PROGRAM": DEFAULT_PROGRAM,
-            "DATABASE": database,
-            "QUERY": query_fasta,
-            "EXPECT": expect,
-            "WORD_SIZE": word_size,
-            "HITLIST_SIZE": hitlist_size,
-            "SHORT_QUERY_ADJUST": str(short_query_adjust).lower(),
-            "FILTER": "F",
-            "MEGABLAST": "on" if megablast else None,
-            "tool": self.tool,
-            "email": self.email,
-        }
-        text = self.get_text(BLAST_URL, params)
-        rid = parse_blast_field(text, "RID")
-        if not rid:
-            raise ValueError(f"NCBI BLAST submission did not return an RID:\n{text[:500]}")
-        rtoe = parse_blast_field(text, "RTOE")
-        return BlastSubmission(rid=rid, rtoe_seconds=int(rtoe) if rtoe and rtoe.isdigit() else None)
-
-    def blast_status(self, rid: str) -> str:
-        text = self.get_text(
-            BLAST_URL,
-            {
-                "CMD": "Get",
-                "RID": rid,
-                "FORMAT_OBJECT": "SearchInfo",
-                "tool": self.tool,
-                "email": self.email,
-            },
-        )
-        status = parse_blast_field(text, "Status")
-        return status or "UNKNOWN"
-
-    def wait_for_result(
-        self,
-        rid: str,
-        poll_seconds: int = DEFAULT_POLL_SECONDS,
-        timeout_seconds: int = 1800,
-    ) -> None:
-        deadline = time.monotonic() + timeout_seconds
-        while time.monotonic() < deadline:
-            status = self.blast_status(rid)
-            if status == "READY":
-                return
-            if status in {"FAILED", "UNKNOWN", "EXPIRED"}:
-                raise ValueError(f"NCBI BLAST RID {rid} returned status {status}.")
-            time.sleep(max(poll_seconds, DEFAULT_POLL_SECONDS))
-        raise TimeoutError(f"Timed out waiting for NCBI BLAST RID {rid}.")
-
-    def fetch_csv(self, rid: str, alignments: int = DEFAULT_HITLIST_SIZE) -> str:
-        return self.get_text(
-            BLAST_URL,
-            {
-                "CMD": "Get",
-                "RID": rid,
-                "FORMAT_TYPE": "CSV",
-                "ALIGNMENT_VIEW": "Tabular",
-                "ALIGNMENTS": alignments,
-                "DESCRIPTIONS": alignments,
-                "tool": self.tool,
-                "email": self.email,
-            },
-        )
-
-    def run_blastn(
-        self,
-        query_sequence: str | None = None,
-        query_fasta: str | None = None,
-        database: str = DEFAULT_DATABASE,
-        expect: str = DEFAULT_EXPECT,
-        word_size: int = DEFAULT_WORD_SIZE,
-        hitlist_size: int = DEFAULT_HITLIST_SIZE,
-        megablast: bool = False,
-        timeout_seconds: int = 1800,
-    ) -> tuple[BlastSubmission, str]:
-        submission = self.submit_blastn(
-            query_sequence=query_sequence,
-            query_fasta=query_fasta,
-            database=database,
-            expect=expect,
-            word_size=word_size,
-            hitlist_size=hitlist_size,
-            megablast=megablast,
-        )
-        if submission.rtoe_seconds:
-            time.sleep(max(submission.rtoe_seconds, DEFAULT_REQUEST_SECONDS))
-        self.wait_for_result(submission.rid, timeout_seconds=timeout_seconds)
-        return submission, self.fetch_csv(submission.rid, alignments=hitlist_size)
-
-
-def parse_blast_field(text: str, field_name: str) -> str | None:
-    """Parse BLAST API fields such as RID, RTOE, or Status."""
-    pattern = re.compile(rf"^\s*{re.escape(field_name)}\s*=\s*(\S+)\s*$", re.MULTILINE)
-    match = pattern.search(text)
-    return match.group(1) if match else None
 
 
 def parse_fasta_records(text: str, sequence_type: str = "AS") -> list[AntisenseQuery]:
@@ -862,25 +675,6 @@ def transcript_cache_path(cache_dir: Path, accession: str) -> Path:
     return cache_dir / f"{sanitize_fasta_name(accession)}.fasta"
 
 
-def normalize_versioned_refseq_accession(accession: object) -> str:
-    """Return an uppercase versioned RefSeq transcript accession."""
-    normalized = clean_text_for_id(accession).upper()
-    if not VERSIONED_REFSEQ_TRANSCRIPT_RE.fullmatch(normalized):
-        if VERSIONED_REFSEQ_GENOMIC_RE.fullmatch(normalized):
-            raise ValueError(
-                f"{normalized} is a genomic RefSeq accession, not a transcript "
-                "accession. Transcript accession mode accepts exact NM/XM/NR/XR "
-                "versions. To compare locally, paste one transcript sequence or "
-                "choose a one-record FASTA/text file. Whole-chromosome NC records "
-                "are not supported in transcript mode."
-            )
-        raise ValueError(
-            "Private panel accessions must include an exact RefSeq transcript "
-            f"version such as NM_000041.4; received: {accession}"
-        )
-    return normalized
-
-
 def target_accession_values(value: object) -> list[str]:
     """Normalize a scalar or repeatable argparse accession value."""
     if value is None:
@@ -977,14 +771,6 @@ def panel_accessions_from_args(args: argparse.Namespace) -> list[str]:
             seen.add(accession)
             accessions.append(accession)
     return accessions
-
-
-def extract_refseq_accession_from_header(header: str) -> str:
-    """Extract a versioned RefSeq transcript accession from a FASTA header."""
-    for token in re.split(r"[|\s]+", clean_text_for_id(header)):
-        if VERSIONED_REFSEQ_TRANSCRIPT_RE.fullmatch(token):
-            return token.upper()
-    return clean_text_for_id(header).split(maxsplit=1)[0].strip("|").upper()
 
 
 def format_cached_transcript_fasta(header: str, sequence: str, width: int = 80) -> str:
@@ -1110,14 +896,11 @@ def retrieve_transcript_targets(
                 )
                 fasta_text = http_client.get_text(
                     EFETCH_URL,
-                    {
-                        "db": "nuccore",
-                        "id": accession,
-                        "rettype": "fasta",
-                        "retmode": "text",
-                        "tool": tool,
-                        "email": request_email,
-                    },
+                    efetch_fasta_params(
+                        accession,
+                        email=request_email,
+                        tool=tool,
+                    ),
                 )
                 retrieved_at = datetime.now(timezone.utc).isoformat()
                 target = transcript_target_from_fasta(
@@ -1176,6 +959,8 @@ def fetch_transcript_fasta(
     email: str | None,
     tool: str = DEFAULT_TOOL,
     cache_dir: Path | None = None,
+    *,
+    client: NcbiHttpClient | None = None,
 ) -> str:
     """Fetch transcript FASTA from NCBI EFetch by accession or UID."""
     if cache_dir is not None:
@@ -1183,18 +968,15 @@ def fetch_transcript_fasta(
         if cache_path.exists():
             return cache_path.read_text(encoding="utf-8-sig")
 
-    request_email = require_email(email)
-    client = NcbiHttpClient(email=request_email, tool=tool)
-    text = client.get_text(
+    request_email = require_email(getattr(client, "email", None) or email)
+    http_client = client or NcbiHttpClient(email=request_email, tool=tool)
+    text = http_client.get_text(
         EFETCH_URL,
-        {
-            "db": "nuccore",
-            "id": accession,
-            "rettype": "fasta",
-            "retmode": "text",
-            "tool": tool,
-            "email": request_email,
-        },
+        efetch_fasta_params(
+            accession,
+            email=getattr(http_client, "email", None) or request_email,
+            tool=tool,
+        ),
     )
     if not text.lstrip().startswith(">"):
         raise ValueError(f"NCBI EFetch did not return FASTA for {accession}:\n{text[:500]}")
@@ -4008,6 +3790,9 @@ def append_rid_log(path: Path, result: BlastBatchResult) -> None:
 def run_blast_batches(
     args: argparse.Namespace,
     queries: list[AntisenseQuery],
+    *,
+    client_factory: Callable[..., NcbiBlastClient] | None = None,
+    sleeper: Callable[[float], None] | None = None,
 ) -> list[BlastBatchResult]:
     queries = assign_unique_blast_query_ids(queries)
     print(
@@ -4015,7 +3800,9 @@ def run_blast_batches(
         f"{len(queries)} oligo sequence(s) outside this computer.",
         file=sys.stderr,
     )
-    client = NcbiBlastClient(
+    make_client = client_factory or NcbiBlastClient
+    sleep = sleeper or time.sleep
+    client = make_client(
         email=require_email(args.email),
         tool=args.tool,
         request_seconds=max(args.request_seconds, DEFAULT_REQUEST_SECONDS),
@@ -4045,7 +3832,7 @@ def run_blast_batches(
         if args.rid_log:
             append_rid_log(args.rid_log, submitted_result)
         if submission.rtoe_seconds:
-            time.sleep(max(submission.rtoe_seconds, DEFAULT_REQUEST_SECONDS))
+            sleep(max(submission.rtoe_seconds, DEFAULT_REQUEST_SECONDS))
         client.wait_for_result(
             submission.rid,
             poll_seconds=max(args.poll_seconds, DEFAULT_POLL_SECONDS),
