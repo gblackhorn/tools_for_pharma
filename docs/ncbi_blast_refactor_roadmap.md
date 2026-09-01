@@ -474,7 +474,7 @@ refactor: extract transcript scan models and engine
 
 ### Phase 6 — Extract target acquisition and cache handling
 
-Status: [ ]
+Status: [x]
 
 Goal: isolate accession, pasted, local-file, and cache target sources.
 
@@ -702,7 +702,7 @@ and any approved deviation from the roadmap.
 | 3. FASTA/comparison primitives | Complete | `9f94705` | 144 tests; 104 focused tests; source FASTA/scan/format smoke checks; PyInstaller build; packaged self-test exit 0 | Shared structural FASTA parsing and equal-length comparison; preserved panel, query, and single-transcript adapters |
 | 4. Identifiers/NCBI transport | Complete | `f227540` | 158 tests; 97 focused tests; CLI help; PyInstaller build; packaged self-test exit 0 | Extracted RefSeq parsing and injectable NCBI transport; tests keep EFetch accession-only and remote BLAST query submission distinct; left `transcript_panel.py` transport unchanged because it shares different URL/contact/response handling with Ensembl |
 | 5. Scan domain package | Complete | `c0c3740` | 163 tests; 88 focused tests; AS and SS source smoke scans; CLI help; PyInstaller build; packaged self-test exit 0 | Added dependency-light models, query preparation, and pure scanner modules; retained pandas table loading and workbook projections in the facade for later interface/reporting phases; `ncbi_blast.py` reduced from 4,067 to 3,597 lines |
-| 6. Targets/cache | Not started | | | |
+| 6. Targets/cache | Complete | `cc7028c` | 171 tests; 96 focused tests; three source CLI smoke checks; CLI help; PyInstaller build; packaged self-test exit 0; packaged GUI checks for pasted, local-file, and cached-accession targets | Added explicit immutable target-source models and mocked cache-miss/reuse/refresh/offline coverage; pasted/local content remains local and is not cached; `ncbi_blast.py` reduced from 3,597 to 3,342 lines |
 | 7. Reporting | Not started | | | |
 | 8. Workflows/remote BLAST | Not started | | | |
 | 9. CLI | Not started | | | |
