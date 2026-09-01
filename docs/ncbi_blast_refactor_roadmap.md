@@ -503,7 +503,7 @@ refactor: isolate transcript targets and cache
 
 ### Phase 7 — Extract reporting and workbook generation
 
-Status: [ ]
+Status: [x]
 
 Goal: isolate presentation without changing output contracts.
 
@@ -703,7 +703,7 @@ and any approved deviation from the roadmap.
 | 4. Identifiers/NCBI transport | Complete | `f227540` | 158 tests; 97 focused tests; CLI help; PyInstaller build; packaged self-test exit 0 | Extracted RefSeq parsing and injectable NCBI transport; tests keep EFetch accession-only and remote BLAST query submission distinct; left `transcript_panel.py` transport unchanged because it shares different URL/contact/response handling with Ensembl |
 | 5. Scan domain package | Complete | `c0c3740` | 163 tests; 88 focused tests; AS and SS source smoke scans; CLI help; PyInstaller build; packaged self-test exit 0 | Added dependency-light models, query preparation, and pure scanner modules; retained pandas table loading and workbook projections in the facade for later interface/reporting phases; `ncbi_blast.py` reduced from 4,067 to 3,597 lines |
 | 6. Targets/cache | Complete | `cc7028c` | 171 tests; 96 focused tests; three source CLI smoke checks; CLI help; PyInstaller build; packaged self-test exit 0; packaged GUI checks for pasted, local-file, and cached-accession targets | Added explicit immutable target-source models and mocked cache-miss/reuse/refresh/offline coverage; pasted/local content remains local and is not cached; `ncbi_blast.py` reduced from 3,597 to 3,342 lines |
-| 7. Reporting | Not started | | | |
+| 7. Reporting | Complete | `833b254` | 177 tests; 102 focused tests; CLI help; PyInstaller build; packaged self-test exit 0; packaged single-text GUI check; representative offline multiple-workbook generation and visual/schema inspection | Added dedicated reporting/workbook composition with shared sheet-name sanitization; preserved source fields such as `Pos20`, one-based mismatch coordinates, technical detail output, and compatibility re-exports; `ncbi_blast.py` reduced from 3,342 to 2,745 lines. The native file picker was not targetable by the GUI automation API, so the multiple-workbook gate used the equivalent source workflow against a local transcript; packaged reporting imports were verified by the build/self-test. |
 | 8. Workflows/remote BLAST | Not started | | | |
 | 9. CLI | Not started | | | |
 | 10. GUI/portable services | Not started | | | |
