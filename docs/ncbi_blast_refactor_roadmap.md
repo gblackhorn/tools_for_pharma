@@ -314,7 +314,7 @@ Run only for release candidates:
 
 ### Phase 1 — Lock behavior and public contracts
 
-Status: [ ]
+Status: [x]
 
 Goal: make moves safe before moving implementation.
 
@@ -697,7 +697,7 @@ and any approved deviation from the roadmap.
 | Phase | Status | Commit | Validation summary | Notes/deviations |
 |---|---|---|---|---|
 | Baseline | Complete | `44349c4` | 120 tests; packaged self-test and GUI validation completed before checkpoint | Version 1.1.0 |
-| 1. Contracts | Not started | | | |
+| 1. Contracts | Complete | `95bbcda` | 128 tests; CLI help; PyInstaller build; packaged self-test exit 0 | Added compatibility, path, normalization, FASTA, and mismatch contracts; no production code changed |
 | 2. Nucleotide primitives | Not started | | | |
 | 3. FASTA/comparison primitives | Not started | | | |
 | 4. Identifiers/NCBI transport | Not started | | | |
@@ -744,4 +744,3 @@ The refactor is complete only when all of the following are true:
 - The PyInstaller one-folder application builds and passes self-test.
 - The packaged GUI passes the smoke matrix from a copied folder.
 - The clean release ZIP contains no generated user data or private sequences.
-
