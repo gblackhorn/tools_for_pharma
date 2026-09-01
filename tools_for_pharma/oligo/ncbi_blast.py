@@ -18,7 +18,6 @@ import argparse
 from dataclasses import dataclass
 import csv
 from datetime import datetime, timezone
-import hashlib
 import io
 import json
 import logging
@@ -93,6 +92,23 @@ from tools_for_pharma.oligo.transcript_scan.scanner import (
     mismatch_positions,
     scan_antisense_against_transcript,
     scan_sense_against_transcript,
+)
+from tools_for_pharma.oligo.transcript_scan.targets import (
+    AccessionTargetSource,
+    LocalFileTargetSource,
+    PastedTargetSource,
+    TranscriptTargetSource,
+    fetch_transcript_fasta,
+    format_cached_transcript_fasta,
+    local_transcript_target,
+    prepare_pasted_transcript_sequence,
+    read_transcript_input,
+    read_transcript_source,
+    retrieve_transcript_targets,
+    transcript_cache_path,
+    transcript_target_from_fasta,
+    transcript_target_source,
+    validate_single_transcript_record,
 )
 from tools_for_pharma.sequence.fasta import (
     FastaRecord,
@@ -373,10 +389,6 @@ def input_query_rows(records: list[AntisenseQuery]) -> list[dict[str, object]]:
     return rows
 
 
-def transcript_cache_path(cache_dir: Path, accession: str) -> Path:
-    return cache_dir / f"{sanitize_fasta_name(accession)}.fasta"
-
-
 def target_accession_values(value: object) -> list[str]:
     """Normalize a scalar or repeatable argparse accession value."""
     if value is None:
@@ -475,288 +487,15 @@ def panel_accessions_from_args(args: argparse.Namespace) -> list[str]:
     return accessions
 
 
-def format_cached_transcript_fasta(header: str, sequence: str, width: int = 80) -> str:
-    """Format a verified transcript while preserving its descriptive header."""
-    dna = normalize_dna(sequence)
-    return format_fasta(
-        FastaRecord.from_header(clean_text_for_id(header), dna),
-        width=width,
-    )
-
-
-def transcript_target_from_fasta(
-    requested_accession: str,
-    fasta_text: str,
-    cache_path: Path,
-    cache_status: str,
-    retrieved_at_utc: str,
-) -> TranscriptTargetResult:
-    """Validate one fetched/cached transcript and build its target record."""
-    validate_single_transcript_record(fasta_text, f"Transcript {requested_accession}")
-    header = get_fasta_header(fasta_text)
-    if not header:
-        raise ValueError(f"Transcript {requested_accession} FASTA header is missing.")
-    retrieved_accession = extract_refseq_accession_from_header(header)
-    if retrieved_accession != requested_accession:
-        raise ValueError(
-            f"Requested exact RefSeq version {requested_accession}, but retrieved "
-            f"{retrieved_accession}."
-        )
-    sequence = fasta_or_plain_text_to_sequence(fasta_text)
-    sequence_dna = normalize_dna(sequence)
-    return TranscriptTargetResult(
-        requested_accession=requested_accession,
-        retrieved_accession=retrieved_accession,
-        transcript_name=header,
-        sequence_5to3=sequence,
-        sequence_length_nt=len(sequence),
-        cache_path=str(cache_path),
-        cache_status=cache_status,
-        exact_version_match=True,
-        sequence_sha256=hashlib.sha256(sequence_dna.encode("ascii")).hexdigest(),
-        retrieved_at_utc=retrieved_at_utc,
-        status="ready",
-    )
-
-
-def retrieve_transcript_targets(
-    accessions: list[str],
-    *,
-    email: str,
-    tool: str = DEFAULT_TOOL,
-    cache_dir: Path,
-    offline: bool = False,
-    refresh: bool = False,
-    request_seconds: int = DEFAULT_REQUEST_SECONDS,
-    client: NcbiHttpClient | None = None,
-    progress_callback: Callable[[int, int, str, str], None] | None = None,
-    cancel_check: Callable[[], bool] | None = None,
-) -> list[TranscriptTargetResult]:
-    """Retrieve public transcript references without transmitting guide sequences."""
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    http_client = client
-
-    results = []
-    total = len(accessions)
-    for index, accession in enumerate(accessions, start=1):
-        if progress_callback:
-            progress_callback(index - 1, total, accession, "starting")
-        if cancel_check and cancel_check():
-            for cancelled_index, cancelled_accession in enumerate(
-                accessions[index - 1 :],
-                start=index,
-            ):
-                cancelled_path = transcript_cache_path(cache_dir, cancelled_accession)
-                results.append(
-                    TranscriptTargetResult(
-                        requested_accession=cancelled_accession,
-                        cache_path=str(cancelled_path),
-                        cache_status=(
-                            "cache" if cancelled_path.exists() else "missing"
-                        ),
-                        status="error",
-                        error="Transcript retrieval cancelled by user.",
-                    )
-                )
-                if progress_callback:
-                    progress_callback(
-                        cancelled_index,
-                        total,
-                        cancelled_accession,
-                        "cancelled",
-                    )
-            break
-        cache_path = transcript_cache_path(cache_dir, accession)
-        cache_existed = cache_path.exists()
-        try:
-            if cache_existed and not refresh:
-                fasta_text = cache_path.read_text(encoding="utf-8-sig")
-                retrieved_at = datetime.fromtimestamp(
-                    cache_path.stat().st_mtime,
-                    tz=timezone.utc,
-                ).isoformat()
-                target = transcript_target_from_fasta(
-                    accession,
-                    fasta_text,
-                    cache_path,
-                    "cache",
-                    retrieved_at,
-                )
-            elif offline:
-                raise ValueError(
-                    f"Offline mode requires cached transcript {accession} at {cache_path}."
-                )
-            else:
-                if http_client is None:
-                    http_client = NcbiHttpClient(
-                        email=require_email(email),
-                        tool=tool,
-                        request_seconds=max(request_seconds, DEFAULT_REQUEST_SECONDS),
-                    )
-                request_email = require_email(
-                    getattr(http_client, "email", None) or email
-                )
-                fasta_text = http_client.get_text(
-                    EFETCH_URL,
-                    efetch_fasta_params(
-                        accession,
-                        email=request_email,
-                        tool=tool,
-                    ),
-                )
-                retrieved_at = datetime.now(timezone.utc).isoformat()
-                target = transcript_target_from_fasta(
-                    accession,
-                    fasta_text,
-                    cache_path,
-                    "refreshed" if cache_existed else "downloaded",
-                    retrieved_at,
-                )
-                cache_path.write_text(
-                    format_cached_transcript_fasta(target.transcript_name, target.sequence_5to3),
-                    encoding="utf-8",
-                )
-            results.append(target)
-        except Exception as error:
-            results.append(
-                TranscriptTargetResult(
-                    requested_accession=accession,
-                    cache_path=str(cache_path),
-                    cache_status=(
-                        "refresh_failed"
-                        if refresh and cache_path.exists()
-                        else "missing" if not cache_path.exists() else "invalid"
-                    ),
-                    status="error",
-                    error=str(error),
-                )
-            )
-        if progress_callback:
-            progress_status = (
-                results[-1].cache_status
-                if results[-1].status == "ready"
-                else results[-1].status
-            )
-            progress_callback(index, total, accession, progress_status)
-    return results
-
-
-def validate_single_transcript_record(text: str, source_label: str) -> None:
-    """Reject multi-record FASTA instead of concatenating transcript records."""
-    record_count = sum(
-        1
-        for raw_line in str(text).splitlines()
-        if raw_line.lstrip().startswith(">")
-    )
-    if record_count > 1:
-        raise ValueError(
-            f"{source_label} contains {record_count} FASTA records. "
-            "The current local transcript scanner accepts exactly one transcript "
-            "record per target; use separate one-record FASTA files."
-        )
-
-
-def fetch_transcript_fasta(
-    accession: str,
-    email: str | None,
-    tool: str = DEFAULT_TOOL,
-    cache_dir: Path | None = None,
-    *,
-    client: NcbiHttpClient | None = None,
-) -> str:
-    """Fetch transcript FASTA from NCBI EFetch by accession or UID."""
-    if cache_dir is not None:
-        cache_path = transcript_cache_path(cache_dir, accession)
-        if cache_path.exists():
-            return cache_path.read_text(encoding="utf-8-sig")
-
-    request_email = require_email(getattr(client, "email", None) or email)
-    http_client = client or NcbiHttpClient(email=request_email, tool=tool)
-    text = http_client.get_text(
-        EFETCH_URL,
-        efetch_fasta_params(
-            accession,
-            email=getattr(http_client, "email", None) or request_email,
-            tool=tool,
-        ),
-    )
-    if not text.lstrip().startswith(">"):
-        raise ValueError(f"NCBI EFetch did not return FASTA for {accession}:\n{text[:500]}")
-    if cache_dir is not None:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        transcript_cache_path(cache_dir, accession).write_text(text, encoding="utf-8")
-    return text
-
-
-def read_transcript_input(
-    transcript_sequence: str | None = None,
-    transcript_file: Path | None = None,
-    accession: str | None = None,
-    email: str | None = None,
-    tool: str = DEFAULT_TOOL,
-    cache_dir: Path | None = None,
-) -> tuple[str, str]:
-    """Return transcript name and normalized RNA sequence from one input source."""
-    provided = [
-        transcript_sequence is not None,
-        transcript_file is not None,
-        accession is not None,
-    ]
-    if sum(provided) != 1:
-        raise ValueError("Provide exactly one of --target-sequence, --target-file, or --target-accession.")
-
-    if accession:
-        fasta_text = fetch_transcript_fasta(
-            accession,
-            email=email,
-            tool=tool,
-            cache_dir=cache_dir,
-        )
-        validate_single_transcript_record(fasta_text, f"NCBI record {accession}")
-        return get_fasta_header(fasta_text) or accession, fasta_or_plain_text_to_sequence(fasta_text)
-
-    if transcript_file:
-        text = transcript_file.read_text(encoding="utf-8-sig")
-        validate_single_transcript_record(text, str(transcript_file))
-        return get_fasta_header(text) or transcript_file.name, fasta_or_plain_text_to_sequence(text)
-
-    assert transcript_sequence is not None
-    validate_single_transcript_record(transcript_sequence, "--target-sequence")
-    return get_fasta_header(transcript_sequence) or "target_transcript", fasta_or_plain_text_to_sequence(transcript_sequence)
-
-
-def prepare_pasted_transcript_sequence(text: str, target_name: str | None = None) -> str:
-    """Return one canonical FASTA record for a pasted local transcript target."""
-    validate_single_transcript_record(text, "Pasted transcript sequence")
-    sequence = fasta_or_plain_text_to_sequence(text)
-    header = clean_text_for_id(target_name or "") or get_fasta_header(text) or "pasted_transcript"
-    return format_cached_transcript_fasta(header, sequence)
-
-
 def local_transcript_target_from_args(args: argparse.Namespace) -> TranscriptTargetResult:
     """Build a ready target record from a pasted sequence or one local file."""
-    transcript_name, sequence = read_transcript_input(
+    source = transcript_target_source(
         transcript_sequence=args.target_sequence,
         transcript_file=args.target_file,
     )
-    sequence_dna = normalize_dna(sequence)
-    if args.target_file:
-        source = "local file"
-        source_path = str(args.target_file)
-    else:
-        source = "pasted sequence"
-        source_path = ""
-    return TranscriptTargetResult(
-        requested_accession=transcript_name,
-        transcript_name=transcript_name,
-        sequence_5to3=sequence,
-        sequence_length_nt=len(sequence),
-        cache_path=source_path,
-        cache_status=source,
-        exact_version_match=False,
-        sequence_sha256=hashlib.sha256(sequence_dna.encode("ascii")).hexdigest(),
-        status="ready",
-    )
+    if not isinstance(source, (PastedTargetSource, LocalFileTargetSource)):
+        raise ValueError("Expected a pasted sequence or local transcript file.")
+    return local_transcript_target(source)
 
 
 def transcript_matches_to_csv(matches: Iterable[TranscriptMatch]) -> str:
@@ -1915,14 +1654,20 @@ def run_single_sequence_scan(
     if accessions:
         if len(accessions) != 1:
             raise ValueError("Single-sequence mode requires exactly one transcript accession.")
-        normalized_accessions = [normalize_versioned_refseq_accession(accessions[0])]
-        targets = retrieve_transcript_targets(
-            normalized_accessions,
-            email=args.email,
-            tool=args.tool,
+        source = AccessionTargetSource(
+            accession=normalize_versioned_refseq_accession(accessions[0]),
             cache_dir=private_panel_cache_dir(args),
             offline=False,
             refresh=bool(getattr(args, "refresh_targets", False)),
+        )
+        assert source.cache_dir is not None
+        targets = retrieve_transcript_targets(
+            [source.accession],
+            email=args.email,
+            tool=args.tool,
+            cache_dir=source.cache_dir,
+            offline=source.offline,
+            refresh=source.refresh,
             request_seconds=args.request_seconds,
             client=client,
             progress_callback=progress_callback,
