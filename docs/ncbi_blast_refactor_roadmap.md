@@ -374,7 +374,7 @@ refactor: centralize nucleotide sequence primitives
 
 ### Phase 3 — Establish generic FASTA and positional comparison primitives
 
-Status: [ ]
+Status: [x]
 
 Goal: remove duplicated parsing/formatting and equal-length comparison logic.
 
@@ -699,7 +699,7 @@ and any approved deviation from the roadmap.
 | Baseline | Complete | `44349c4` | 120 tests; packaged self-test and GUI validation completed before checkpoint | Version 1.1.0 |
 | 1. Contracts | Complete | `95bbcda` | 128 tests; CLI help; PyInstaller build; packaged self-test exit 0 | Added compatibility, path, normalization, FASTA, and mismatch contracts; no production code changed |
 | 2. Nucleotide primitives | Complete | `ec8a14f` | 135 tests; 95 focused tests; three source CLI smoke checks; PyInstaller build; packaged self-test exit 0 | Added `tools_for_pharma.sequence`; preserved strict oligo and N-aware transcript-panel policies |
-| 3. FASTA/comparison primitives | Not started | | | |
+| 3. FASTA/comparison primitives | Complete | `9f94705` | 144 tests; 104 focused tests; source FASTA/scan/format smoke checks; PyInstaller build; packaged self-test exit 0 | Shared structural FASTA parsing and equal-length comparison; preserved panel, query, and single-transcript adapters |
 | 4. Identifiers/NCBI transport | Not started | | | |
 | 5. Scan domain package | Not started | | | |
 | 6. Targets/cache | Not started | | | |
