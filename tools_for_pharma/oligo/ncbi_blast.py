@@ -35,6 +35,12 @@ from urllib.request import Request, urlopen
 
 from tools_for_pharma.oligo.core import get_complementary_sequence
 from tools_for_pharma.oligo.transcript import fasta_or_plain_text_to_sequence, get_fasta_header
+from tools_for_pharma.sequence.comparison import mismatch_positions_1based
+from tools_for_pharma.sequence.fasta import (
+    FastaRecord,
+    format_fasta,
+    parse_fasta,
+)
 from tools_for_pharma.sequence.nucleotides import (
     normalize_dna as normalize_dna_sequence,
     normalize_rna,
@@ -221,9 +227,11 @@ def normalize_dna(sequence: str) -> str:
 def fasta_record(name: str, sequence: str, line_width: int = 80) -> str:
     """Return a simple FASTA record from a raw nucleotide sequence."""
     cleaned = normalize_dna(sequence)
-    lines = [f">{sanitize_fasta_name(name)}"]
-    lines.extend(cleaned[index : index + line_width] for index in range(0, len(cleaned), line_width))
-    return "\n".join(lines)
+    return format_fasta(
+        FastaRecord(sanitize_fasta_name(name), "", cleaned),
+        width=line_width,
+        trailing_newline=False,
+    )
 
 
 def sanitize_fasta_name(name: str) -> str:
@@ -471,37 +479,47 @@ def parse_blast_field(text: str, field_name: str) -> str | None:
 
 def parse_fasta_records(text: str, sequence_type: str = "AS") -> list[AntisenseQuery]:
     """Parse FASTA text into AS or SS query records."""
-    records = []
     normalized_type = normalize_sequence_type(sequence_type)
-    name: str | None = None
-    sequence_lines: list[str] = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith(">"):
-            if name is not None:
-                records.append(
-                    AntisenseQuery(
-                        name,
-                        normalize_rna("".join(sequence_lines)),
-                        sequence_type=normalized_type,
-                    )
-                )
-            name = line[1:].strip() or default_query_name(normalized_type, len(records) + 1)
-            sequence_lines = []
-        else:
-            sequence_lines.append(line)
+    lines = str(text).splitlines()
+    first_header_index = next(
+        (
+            index
+            for index, raw_line in enumerate(lines)
+            if raw_line.strip().startswith(">")
+        ),
+        None,
+    )
+    if first_header_index is None:
+        return []
 
-    if name is not None:
-        records.append(
-            AntisenseQuery(
-                name,
-                normalize_rna("".join(sequence_lines)),
-                sequence_type=normalized_type,
-            )
+    compatibility_lines = lines[first_header_index:]
+    query_names = []
+    header_count = 0
+    for index, raw_line in enumerate(compatibility_lines):
+        line = raw_line.strip()
+        if not line.startswith(">"):
+            continue
+        header_count += 1
+        query_name = line[1:].strip() or default_query_name(
+            normalized_type,
+            header_count,
         )
-    return records
+        query_names.append(query_name)
+        if not line[1:].strip():
+            compatibility_lines[index] = f">{query_name}"
+
+    fasta_records = parse_fasta(
+        "\n".join(compatibility_lines),
+        ignore_comments=False,
+    )
+    return [
+        AntisenseQuery(
+            query_name,
+            normalize_rna(record.sequence),
+            sequence_type=normalized_type,
+        )
+        for query_name, record in zip(query_names, fasta_records)
+    ]
 
 
 def parse_plain_antisense_lines(text: str, sequence_type: str = "AS") -> list[AntisenseQuery]:
@@ -972,9 +990,10 @@ def extract_refseq_accession_from_header(header: str) -> str:
 def format_cached_transcript_fasta(header: str, sequence: str, width: int = 80) -> str:
     """Format a verified transcript while preserving its descriptive header."""
     dna = normalize_dna(sequence)
-    lines = [f">{clean_text_for_id(header)}"]
-    lines.extend(dna[index : index + width] for index in range(0, len(dna), width))
-    return "\n".join(lines) + "\n"
+    return format_fasta(
+        FastaRecord.from_header(clean_text_for_id(header), dna),
+        width=width,
+    )
 
 
 def transcript_target_from_fasta(
@@ -1258,7 +1277,7 @@ def local_transcript_target_from_args(args: argparse.Namespace) -> TranscriptTar
 
 def mismatch_positions(query: str, target: str) -> tuple[int, ...]:
     """Return 1-based mismatch positions between equal-length RNA strings."""
-    return tuple(index + 1 for index, (left, right) in enumerate(zip(query, target)) if left != right)
+    return mismatch_positions_1based(query, target)
 
 
 def scan_antisense_against_transcript(

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from tools_for_pharma.sequence.fasta import parse_fasta, require_single_fasta_record
 from tools_for_pharma.sequence.nucleotides import (
     normalize_rna,
     reverse_complement_rna,
@@ -39,6 +40,13 @@ def read_text_sequence_file(input_path: str) -> str:
 
 def fasta_or_plain_text_to_sequence(text: str) -> str:
     """Extract sequence letters from FASTA or plain sequence text as RNA."""
+    if any(line.lstrip().startswith(">") for line in str(text).splitlines()):
+        record = require_single_fasta_record(
+            parse_fasta(text),
+            source_label="Transcript input",
+        )
+        return normalize_rna(record.sequence)
+
     lines = []
     for raw_line in str(text).splitlines():
         line = raw_line.strip()

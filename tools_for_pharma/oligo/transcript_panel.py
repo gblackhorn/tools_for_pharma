@@ -20,6 +20,11 @@ from datetime import date
 from pathlib import Path
 from typing import Iterable, Sequence
 
+from tools_for_pharma.sequence.fasta import (
+    FastaRecord,
+    format_fasta,
+    parse_fasta,
+)
 from tools_for_pharma.sequence.nucleotides import (
     SequenceNormalizationError,
     normalize_dna as normalize_dna_sequence,
@@ -29,15 +34,6 @@ from tools_for_pharma.sequence.nucleotides import (
 ENSEMBL_REST_URL = "https://rest.ensembl.org"
 NCBI_EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 DEFAULT_TOOL_NAME = "tools_for_pharma_transcript_panel"
-
-
-@dataclass(frozen=True)
-class FastaRecord:
-    """One FASTA record."""
-
-    identifier: str
-    description: str
-    sequence: str
 
 
 @dataclass(frozen=True)
@@ -164,55 +160,14 @@ def normalize_dna(sequence: str) -> str:
 
 def parse_fasta_records(text: str) -> list[FastaRecord]:
     """Parse FASTA text without joining adjacent records."""
-
-    records: list[FastaRecord] = []
-    header: str | None = None
-    sequence_lines: list[str] = []
-
-    def append_record() -> None:
-        if header is None:
-            return
-        identifier, _, description = header.partition(" ")
-        records.append(
-            FastaRecord(
-                identifier=identifier,
-                description=description.strip(),
-                sequence=normalize_dna("".join(sequence_lines)),
-            )
+    return [
+        FastaRecord(
+            identifier=record.identifier,
+            description=record.description,
+            sequence=normalize_dna(record.sequence),
         )
-
-    for raw_line in str(text).splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith(";"):
-            continue
-        if line.startswith(">"):
-            append_record()
-            header = line[1:].strip()
-            if not header:
-                raise ValueError("FASTA header cannot be blank.")
-            sequence_lines = []
-        else:
-            if header is None:
-                raise ValueError("Sequence content appeared before the first FASTA header.")
-            sequence_lines.append(line)
-
-    append_record()
-    if not records:
-        raise ValueError("No FASTA records found.")
-    return records
-
-
-def format_fasta(record: FastaRecord, width: int = 70) -> str:
-    """Format one record as FASTA."""
-
-    header = record.identifier
-    if record.description:
-        header += f" {record.description}"
-    sequence_lines = [
-        record.sequence[index : index + width]
-        for index in range(0, len(record.sequence), width)
+        for record in parse_fasta(text)
     ]
-    return f">{header}\n" + "\n".join(sequence_lines) + "\n"
 
 
 def _request_text(url: str, *, accept: str, timeout_seconds: int = 60) -> str:

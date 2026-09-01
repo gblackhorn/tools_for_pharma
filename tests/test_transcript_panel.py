@@ -6,6 +6,7 @@ from tools_for_pharma.oligo.transcript_panel import (
     FastaRecord,
     classify_reference_region,
     compare_transcript_to_reference,
+    format_fasta,
     parse_fasta_records,
 )
 
@@ -20,6 +21,12 @@ def test_parse_fasta_records_keeps_records_separate() -> None:
 def test_parse_fasta_records_rejects_sequence_before_header() -> None:
     with pytest.raises(ValueError, match="before the first FASTA header"):
         parse_fasta_records("ACGT")
+
+
+def test_panel_fasta_formatter_keeps_positional_width_compatibility() -> None:
+    record = FastaRecord("ref", "description", "AACCGGTT")
+
+    assert format_fasta(record, 4) == ">ref description\nAACC\nGGTT\n"
 
 
 def test_classify_reference_region() -> None:

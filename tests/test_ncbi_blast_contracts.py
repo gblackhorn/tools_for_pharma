@@ -139,5 +139,16 @@ def test_current_fasta_adapters_preserve_record_boundaries() -> None:
         )
 
 
+def test_query_fasta_adapter_preserves_names_and_blank_header_defaults() -> None:
+    queries = ncbi_blast.parse_fasta_records(
+        ">AS_one   description\nAUGC\n>\nCCGA\n"
+    )
+
+    assert [query.name for query in queries] == ["AS_one   description", "AS_2"]
+
+
 def test_equal_length_mismatch_positions_are_one_based() -> None:
     assert ncbi_blast.mismatch_positions("AUGC", "AUAC") == (3,)
+
+    with pytest.raises(ValueError, match="same length; received 4 and 3"):
+        ncbi_blast.mismatch_positions("AUGC", "AUG")
