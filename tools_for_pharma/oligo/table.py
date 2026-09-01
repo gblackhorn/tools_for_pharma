@@ -9,8 +9,8 @@ from tools_for_pharma.oligo.core import (
     DEFAULT_END,
     DEFAULT_START,
     antisense_region_to_sense,
-    normalize_rna,
 )
+from tools_for_pharma.sequence.nucleotides import normalize_rna
 from tools_for_pharma.shared.excel_utils import (
     append_or_replace_sheet,
     list_excel_sheets,

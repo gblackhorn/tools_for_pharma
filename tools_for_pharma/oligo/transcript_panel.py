@@ -12,7 +12,6 @@ import csv
 import difflib
 import json
 import os
-import re
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -20,6 +19,11 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 from typing import Iterable, Sequence
+
+from tools_for_pharma.sequence.nucleotides import (
+    SequenceNormalizationError,
+    normalize_dna as normalize_dna_sequence,
+)
 
 
 ENSEMBL_REST_URL = "https://rest.ensembl.org"
@@ -144,14 +148,18 @@ class PanelResult:
 
 def normalize_dna(sequence: str) -> str:
     """Return an uppercase DNA sequence containing only supported bases."""
-
-    normalized = re.sub(r"\s+", "", str(sequence)).upper().replace("U", "T")
-    if not normalized:
-        raise ValueError("Sequence is empty.")
-    invalid = sorted(set(normalized) - set("ACGTN"))
-    if invalid:
-        raise ValueError(f"Unsupported sequence characters: {''.join(invalid)}")
-    return normalized
+    try:
+        return normalize_dna_sequence(
+            sequence,
+            allowed_ambiguity_codes="N",
+            cleanup="whitespace",
+        )
+    except SequenceNormalizationError as error:
+        if error.reason == "empty":
+            raise ValueError("Sequence is empty.") from None
+        raise ValueError(
+            f"Unsupported sequence characters: {''.join(error.invalid_bases)}"
+        ) from None
 
 
 def parse_fasta_records(text: str) -> list[FastaRecord]:

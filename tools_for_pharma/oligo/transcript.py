@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from tools_for_pharma.oligo.core import (
-    get_complementary_sequence,
-    get_subsequence,
+from tools_for_pharma.sequence.nucleotides import (
     normalize_rna,
+    reverse_complement_rna,
+    subsequence_1based,
 )
 
 
@@ -70,8 +70,8 @@ def transcript_region_to_oligo(
     position numbering.
     """
     normalized_transcript = normalize_rna(transcript_sequence)
-    ss_5to3 = get_subsequence(normalized_transcript, start=start, end=end)
-    as_5to3 = get_complementary_sequence(ss_5to3, reverse=True)
+    ss_5to3 = subsequence_1based(normalized_transcript, start=start, end=end)
+    as_5to3 = reverse_complement_rna(ss_5to3)
 
     return TranscriptOligoResult(
         source_name=source_name,

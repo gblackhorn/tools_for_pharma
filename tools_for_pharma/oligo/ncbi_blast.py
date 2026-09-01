@@ -33,8 +33,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from tools_for_pharma.oligo.core import get_complementary_sequence, normalize_rna
+from tools_for_pharma.oligo.core import get_complementary_sequence
 from tools_for_pharma.oligo.transcript import fasta_or_plain_text_to_sequence, get_fasta_header
+from tools_for_pharma.sequence.nucleotides import (
+    normalize_dna as normalize_dna_sequence,
+    normalize_rna,
+)
 from tools_for_pharma.shared.excel_utils import list_excel_sheets
 
 
@@ -211,7 +215,7 @@ class BlastBatchResult:
 
 def normalize_dna(sequence: str) -> str:
     """Normalize a sequence to DNA letters for NCBI BLAST requests."""
-    return normalize_rna(sequence).replace("U", "T")
+    return normalize_dna_sequence(sequence)
 
 
 def fasta_record(name: str, sequence: str, line_width: int = 80) -> str:
