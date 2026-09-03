@@ -241,7 +241,8 @@ subject and an independently testable contract.
 
 ### Gate S: source validation
 
-Run after every phase:
+During implementation, run only focused tests for the modules being changed.
+Run the following complete source gate once at the end of each phase:
 
 ```powershell
 python -m pytest -q
@@ -249,15 +250,17 @@ python -m tools_for_pharma.oligo.ncbi_blast --help
 git diff --check
 ```
 
-Also run focused tests for the modules changed in that phase. The complete test
-suite must not fall below the established behavior; test-count changes must be
-explained by added or deliberately consolidated tests, never by deleting
-coverage to make a phase pass.
+The complete test suite must not fall below the established behavior;
+test-count changes must be explained by added or deliberately consolidated
+tests, never by deleting coverage to make a phase pass. Do not repeat the full
+suite after every small edit when focused tests provide the necessary feedback.
 
 ### Gate P: packaged import/self-test validation
 
-Run whenever imports reachable from `transcript_scan_app.py` change, whenever a
-module moves, and at every GUI-related phase:
+For the remaining roadmap, run this gate after Phase 10 and again for the final
+Phase 12 release candidate. An extra package checkpoint is warranted only when
+an unexpected change directly affects `transcript_scan_app.py`, the PyInstaller
+specification, or bundled dependencies.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File deployment\build_transcript_scan.ps1
@@ -275,24 +278,51 @@ Gate P must confirm:
 - An Excel write/read round trip succeeds.
 - The copied template and deployment documents are present.
 
-### Gate G: packaged GUI smoke validation
+### Gate G: GUI validation
 
-Run after changes to GUI, workflow dispatch, target handling, cache/settings
-paths, or final packaging:
+For future phases, GUI validation is split into an automated contract gate and
+a manual acceptance gate. References to Gate G in completed Phases 1-8 are
+historical records and do not require those checks to be repeated.
 
-- Launch `dist\TranscriptScan\TranscriptScan.exe` directly.
-- Confirm mode selection opens.
-- Confirm saved email loads, or first-use email is requested in a clean data
-  directory.
-- Run a single scan with a pasted transcript.
-- Choose "Edit and run again" and confirm the form remains populated.
-- Run a single scan with a local one-record FASTA/text target.
-- Run an accession scan from a cache miss and confirm automatic download.
-- Repeat the accession scan and confirm cache reuse.
-- Confirm refresh applies to one run only.
-- Run a multiple-sequence workbook and inspect the sheet order and key columns.
-- Confirm logs are written beside the executable.
-- Confirm pasted/local transcript content is not persisted in settings or cache.
+#### Gate G-A: automated GUI contracts
+
+Use focused tests without Windows screen control to verify:
+
+- mode and target-source dispatch;
+- GUI settings-to-workflow argument/configuration conversion;
+- single-form draft retention for "Edit and run again";
+- first-use email, settings, cache, log, and portable-data paths;
+- cache miss/reuse/refresh/offline behavior with mocked EFetch or prepared
+  cache files;
+- single-sequence text output and multiple-workbook sheet/column contracts;
+- pasted/local transcript content is not persisted in settings or cache.
+
+Use programmatic workbook assertions for routine validation. Render or inspect
+the workbook visually only when layout code changes or during Phase 12.
+
+#### Gate G-M: manual packaged GUI acceptance
+
+The user should operate the packaged app using a short checklist. Windows
+control automation is not part of routine validation and should be used only
+when the user explicitly requests it.
+
+After Phase 10, run one focused manual check:
+
+- launch `dist\TranscriptScan\TranscriptScan.exe` directly;
+- run one single-sequence scan with a pasted transcript;
+- choose "Edit and run again" and confirm the form remains populated;
+- run one representative multiple-sequence workbook and confirm the useful
+  results sheet is second.
+
+During Phase 12, run the complete manual release matrix once:
+
+- confirm mode selection and first-use/saved-email behavior;
+- run pasted and local one-record transcript targets;
+- run an accession from cache miss, repeat for cache reuse, and confirm refresh
+  applies to one run only;
+- run a multiple-sequence workbook and inspect sheet order and key columns;
+- confirm logs are written beside the executable;
+- confirm pasted/local transcript content is absent from settings and cache.
 
 Use non-sensitive test sequences. Do not use remote BLAST with a private query
 as a packaging smoke test.
@@ -309,6 +339,19 @@ Run only for release candidates:
 - Verify the release folder/ZIP does not contain `TranscriptScanData`, logs,
   settings, cached transcripts, test outputs, or private sequences.
 - Record ZIP size and SHA-256 checksum.
+
+### Validation economy rules for Phases 9-12
+
+- Prefer focused tests while editing and one full suite at the phase milestone.
+- Do not use Windows control for routine GUI validation.
+- Use mocked NCBI requests or prepared public-transcript caches; never submit a
+  private guide to live remote BLAST as a test.
+- Validate workbook content and schema programmatically unless layout itself
+  changed.
+- Run clean PyInstaller builds only for Phases 10 and 12 unless an unexpected
+  package-entry, specification, or dependency change justifies one extra gate.
+- Preserve concise validation summaries rather than retaining verbose build,
+  test, screenshot, or workbook-preview output.
 
 ## Execution phases
 
@@ -583,8 +626,11 @@ Tasks:
 Exit gate:
 
 - Gate S passes.
-- Gate P passes.
-- Both GUI batch files launch successfully from the repository checkout.
+- Representative AS, SS, pasted-target, file-target, accession, table, and
+  mocked remote-BLAST CLI paths pass without live private-query submission.
+- Both GUI batch files are inspected for the expected module/`--gui` launch
+  contract; opening their windows is deferred to Phase 10 manual acceptance.
+- Gate P and Windows GUI control are not required for this phase.
 
 Suggested commit:
 
@@ -616,9 +662,9 @@ Exit gate:
 
 - Gate S passes.
 - Gate P passes.
-- Full Gate G passes.
-- Test a copied `dist\TranscriptScan` folder, not only the repository build
-  location.
+- Gate G-A passes.
+- The focused Phase 10 Gate G-M checklist passes through user operation.
+- Copied-folder and full manual-matrix validation are deferred to Phase 12.
 
 Suggested commit:
 
@@ -647,8 +693,11 @@ Tasks:
 Exit gate:
 
 - Gate S passes.
-- Gate P passes.
-- Full Gate G passes.
+- Compatibility import/re-export contracts pass.
+- Gate G-A remains covered without repeating packaged GUI interaction.
+- Gate P and Gate G-M are not required because the packaged entry point should
+  import the extracted GUI/application modules directly, not the compatibility
+  facade.
 - `ncbi_blast.py` is a thin compatibility facade, ideally about 100–250 lines.
 
 Suggested commit:
@@ -669,8 +718,9 @@ Tasks:
 - Review README, deployment instructions, version file, and third-party notices.
 - Decide and apply the release version consistently.
 - Perform a clean PyInstaller build.
-- Run packaged self-test and complete GUI smoke matrix.
-- Inspect workbook output from the packaged executable.
+- Run packaged self-test and the complete manual Gate G-M matrix once.
+- Validate workbook values and schema programmatically, then visually inspect
+  one representative packaged workbook.
 - Test from a copied folder outside the repository.
 - Run Gate R and generate a clean ZIP.
 - Record ZIP path, size, and SHA-256 checksum.
@@ -678,7 +728,7 @@ Tasks:
 
 Exit gate:
 
-- Gates S, P, G, and R all pass.
+- Gates S, P, G-A, G-M, and R all pass.
 - The release package works without a Python installation.
 - No private/test data is included.
 - The roadmap progress table is complete.
