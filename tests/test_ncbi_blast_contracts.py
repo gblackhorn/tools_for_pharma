@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,23 @@ def test_ncbi_blast_keeps_repository_compatibility_exports() -> None:
     )
 
     assert missing == []
+
+
+def test_compatibility_facade_has_an_explicit_supported_surface() -> None:
+    tree = ast.parse(Path(ncbi_blast.__file__).read_text(encoding="utf-8"))
+    wildcard_imports = [
+        alias
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.name == "*"
+    ]
+
+    assert wildcard_imports == []
+    assert len(ncbi_blast.__all__) == len(set(ncbi_blast.__all__))
+    assert REQUIRED_NCBI_BLAST_EXPORTS <= set(ncbi_blast.__all__)
+    assert all(hasattr(ncbi_blast, name) for name in ncbi_blast.__all__)
+    assert {"argparse", "logging", "Path", "sys"}.isdisjoint(ncbi_blast.__all__)
 
 
 def test_portable_entry_point_uses_extracted_application_modules() -> None:
