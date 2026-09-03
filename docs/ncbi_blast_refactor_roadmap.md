@@ -674,7 +674,7 @@ refactor: extract transcript scan GUI
 
 ### Phase 11 — Reduce the compatibility facade
 
-Status: [ ]
+Status: [x]
 
 Goal: finish with a small, stable `ncbi_blast.py` rather than another large
 coordinator.
@@ -757,7 +757,7 @@ and any approved deviation from the roadmap.
 | 8. Workflows/remote BLAST | Complete | `afa3183` | 185 tests including mocked remote-BLAST lifecycle; CLI help; direct AS, SS, and offline cached-panel smoke scans; PyInstaller build; packaged self-test exit 0; packaged first-use email and mode chooser opened | Added explicit local, single, and panel workflow configs plus a clearly named remote-BLAST service for submission, polling, retrieval, filtering, batching, and RID logs; preserved facade imports and privacy warnings; local workflows do not import `argparse`, `remote_blast`, or `NcbiBlastClient`; `ncbi_blast.py` reduced from 2,745 to 2,417 lines. The GUI automation API lost the Tk window during the single-form transition, so the full packaged GUI gate was not repeated; source workflow contracts and the packaged import/self-test gate passed. |
 | 9. CLI | Complete | `3843ba5` | 197 tests; 109 focused CLI/facade/workflow/reporting tests; CLI help; direct AS, SS, pasted-target, local-file, cached-accession, and table paths; mocked remote-BLAST dispatch; both GUI batch launch commands inspected | Added `transcript_scan/cli.py` for parsing, validation, dispatch, and explicit workflow-config adapters; preserved `ncbi_blast.main()` and module execution plus compatibility re-exports; the CLI layer has no Tkinter or compatibility-facade dependency; `ncbi_blast.py` reduced from 2,417 to 1,500 lines. Per the lean roadmap, no live private-query submission, Windows GUI control, Gate P, or package build was performed. |
 | 10. GUI/portable services | Complete | `d42a44f` | 204 tests; 102 focused GUI/facade/CLI tests; CLI help; clean PyInstaller build; packaged self-test exit 0; required distribution files present; user-operated single pasted-target/Edit-and-run-again and multiple-workbook checks passed | Added `transcript_scan/gui.py` and `app_services.py`; the packaged entry point imports the extracted GUI, portable paths, and workflow modules directly and its self-test covers those imports; compatibility re-exports and module execution remain intact; `ncbi_blast.py` reduced from 1,500 to 23 lines. PyInstaller discovered the extracted modules statically, so the specification needed no change. The build required execution outside the filesystem sandbox so native Tcl/Tk discovery could read its installed library files. |
-| 11. Compatibility facade | Not started | | | |
+| 11. Compatibility facade | Complete | `442db92` | 205 tests; 130 focused facade/domain/target/reporting/workflow/CLI/GUI tests; CLI help; repository caller audit; compatibility import and identity contracts | Replaced the temporary wildcard facade with 106 explicit documented exports and `__all__`; all 47 names statically used by repository callers are covered; module execution and GUI dispatch remain compatible; documentation now distinguishes local accession-based scanning from explicit remote query submission; `ncbi_blast.py` is 199 lines. Gate P and manual GUI validation were not repeated because the packaged entry point imports extracted modules directly, as planned. |
 | 12. Release package | Not started | | | |
 
 ## Per-phase working protocol
