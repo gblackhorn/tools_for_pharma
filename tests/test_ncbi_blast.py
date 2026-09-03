@@ -5,6 +5,7 @@ import pytest
 from urllib.error import URLError
 
 import tools_for_pharma.oligo.ncbi_blast as ncbi_blast
+from tools_for_pharma.oligo.transcript_scan import app_services
 
 from tools_for_pharma.oligo.ncbi_blast import (
     AntisenseRegion,
@@ -85,14 +86,14 @@ def test_portable_gui_settings_and_cache_use_local_data_subfolder(
     monkeypatch,
 ) -> None:
     data_dir = tmp_path / "TranscriptScanData"
-    monkeypatch.setattr(ncbi_blast, "application_data_dir", lambda: data_dir)
+    monkeypatch.setattr(app_services, "application_data_dir", lambda: data_dir)
 
-    saved_path = ncbi_blast.save_gui_settings({"ncbi_email": "user@example.com"})
+    saved_path = app_services.save_gui_settings({"ncbi_email": "user@example.com"})
 
     assert saved_path == data_dir / "settings.json"
-    assert ncbi_blast.load_gui_settings() == {"ncbi_email": "user@example.com"}
-    assert ncbi_blast.shared_gui_transcript_cache_dir() == data_dir / "transcript_cache"
-    assert ncbi_blast.gui_log_path() == data_dir / "logs" / "transcript_scan.log"
+    assert app_services.load_gui_settings() == {"ncbi_email": "user@example.com"}
+    assert app_services.shared_gui_transcript_cache_dir() == data_dir / "transcript_cache"
+    assert app_services.gui_log_path() == data_dir / "logs" / "transcript_scan.log"
 
 
 def test_scan_antisense_against_transcript_finds_reverse_complement() -> None:

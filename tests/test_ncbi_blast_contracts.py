@@ -8,6 +8,7 @@ import pytest
 
 import transcript_scan_app
 from tools_for_pharma.oligo import ncbi_blast
+from tools_for_pharma.oligo.transcript_scan import app_services, gui
 from tools_for_pharma.oligo.core import (
     get_complementary_sequence,
     get_subsequence,
@@ -76,22 +77,25 @@ def test_ncbi_blast_keeps_repository_compatibility_exports() -> None:
     assert missing == []
 
 
-def test_portable_entry_point_uses_ncbi_blast_compatibility_exports() -> None:
-    assert transcript_scan_app.application_data_dir is ncbi_blast.application_data_dir
-    assert transcript_scan_app.gui_log_path is ncbi_blast.gui_log_path
-    assert transcript_scan_app.run_gui is ncbi_blast.run_gui
+def test_portable_entry_point_uses_extracted_application_modules() -> None:
+    assert transcript_scan_app.application_data_dir is app_services.application_data_dir
+    assert transcript_scan_app.gui_log_path is app_services.gui_log_path
+    assert transcript_scan_app.run_gui is gui.run_gui
     assert (
         transcript_scan_app.shared_gui_transcript_cache_dir
-        is ncbi_blast.shared_gui_transcript_cache_dir
+        is app_services.shared_gui_transcript_cache_dir
     )
+    assert ncbi_blast.application_data_dir is app_services.application_data_dir
+    assert ncbi_blast.gui_log_path is app_services.gui_log_path
+    assert ncbi_blast.run_gui is gui.run_gui
 
 
 def test_application_base_dir_uses_repository_root_during_source_run(
     monkeypatch,
 ) -> None:
-    monkeypatch.delattr(ncbi_blast.sys, "frozen", raising=False)
+    monkeypatch.delattr(app_services.sys, "frozen", raising=False)
 
-    assert ncbi_blast.application_base_dir() == Path(ncbi_blast.__file__).resolve().parents[2]
+    assert app_services.application_base_dir() == Path(ncbi_blast.__file__).resolve().parents[2]
 
 
 def test_application_base_dir_uses_executable_folder_when_frozen(
@@ -99,11 +103,11 @@ def test_application_base_dir_uses_executable_folder_when_frozen(
     monkeypatch,
 ) -> None:
     executable = tmp_path / "portable" / "TranscriptScan.exe"
-    monkeypatch.setattr(ncbi_blast.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(ncbi_blast.sys, "executable", str(executable))
+    monkeypatch.setattr(app_services.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(app_services.sys, "executable", str(executable))
 
-    assert ncbi_blast.application_base_dir() == executable.parent
-    assert ncbi_blast.application_data_dir() == executable.parent / "TranscriptScanData"
+    assert app_services.application_base_dir() == executable.parent
+    assert app_services.application_data_dir() == executable.parent / "TranscriptScanData"
 
 
 def test_current_rna_normalization_and_coordinate_contract() -> None:

@@ -6,12 +6,12 @@ import logging
 from logging.handlers import RotatingFileHandler
 import sys
 
-from tools_for_pharma.oligo.ncbi_blast import (
+from tools_for_pharma.oligo.transcript_scan.app_services import (
     application_data_dir,
     gui_log_path,
-    run_gui,
     shared_gui_transcript_cache_dir,
 )
+from tools_for_pharma.oligo.transcript_scan.gui import run_gui
 
 
 APP_NAME = "Transcript Scan"
@@ -63,6 +63,10 @@ def run_self_test() -> int:
     import openpyxl  # noqa: F401
     import pandas
     import tkinter
+    from tools_for_pharma.oligo.transcript_scan import gui, workflows
+
+    if not callable(gui.run_gui) or not callable(workflows.run_single_sequence_scan):
+        raise RuntimeError("Packaged GUI/workflow imports are incomplete.")
 
     data_dir = application_data_dir()
     data_dir.mkdir(parents=True, exist_ok=True)
