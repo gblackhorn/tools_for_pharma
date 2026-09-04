@@ -220,6 +220,12 @@ python -m pip install -r deployment\requirements-transcript-scan.txt
 powershell -NoProfile -ExecutionPolicy Bypass -File deployment\build_transcript_scan.ps1
 ```
 
+For a clean versioned release folder and ZIP after validation, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File deployment\package_transcript_scan_release.ps1
+```
+
 Share the complete `dist\TranscriptScan` folder, or ZIP that folder without
 moving `TranscriptScan.exe` out of it. The app creates its writable
 `TranscriptScanData` subfolder on first use. Build and end-user instructions are

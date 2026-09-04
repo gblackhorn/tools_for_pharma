@@ -1,4 +1,4 @@
-Transcript Scan 1.1.0
+Transcript Scan 1.1.1
 =====================
 
 Requirements
@@ -23,6 +23,16 @@ and are not accepted in transcript-accession mode.
 After reviewing a result, choose Edit and run again to return to the populated
 form. These form values stay only until the app is closed. Refresh from NCBI is
 a one-time action and resets after a successful run.
+
+Multiple-sequence workbook
+--------------------------
+Use multiple_sequence_blast_template.xlsx for the Excel sequence table workflow.
+Enter one sequence per row on the multiple_sequence_input sheet. Keep each run
+entirely AS or entirely SS, and select the matching sequence type in the app.
+
+The result workbook is saved beside the selected input workbook. The most useful
+comparison_results sheet is second, after input_queries. Technical match details
+and run metadata follow it.
 
 Local data
 ----------

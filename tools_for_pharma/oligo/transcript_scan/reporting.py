@@ -470,15 +470,28 @@ def write_excel_workbook(
     sheets: dict[str, list[dict[str, object]]],
 ) -> None:
     import pandas as pd
+    from openpyxl.utils import get_column_letter
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    with pd.ExcelWriter(path) as writer:
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for sheet_name, rows in sheets.items():
-            pd.DataFrame(rows).to_excel(
+            frame = pd.DataFrame(rows)
+            safe_sheet_name = sanitize_sheet_name(sheet_name)
+            frame.to_excel(
                 writer,
-                sheet_name=sanitize_sheet_name(sheet_name),
+                sheet_name=safe_sheet_name,
                 index=False,
             )
+            worksheet = writer.sheets[safe_sheet_name]
+            for column_index, column_name in enumerate(frame.columns, start=1):
+                values = frame[column_name].dropna().astype(str)
+                longest_value = max(
+                    [len(str(column_name)), *(len(value) for value in values)],
+                    default=len(str(column_name)),
+                )
+                worksheet.column_dimensions[
+                    get_column_letter(column_index)
+                ].width = min(max(longest_value + 2, 10), 48)
 
 
 def default_result_workbook(args: argparse.Namespace) -> Path | None:

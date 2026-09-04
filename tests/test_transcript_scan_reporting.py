@@ -65,6 +65,34 @@ def test_facade_reexports_reporting_functions() -> None:
     } == {name: True for name in REPORTING_EXPORTS}
 
 
+def test_generated_workbook_widths_keep_headers_and_short_values_visible(
+    tmp_path: Path,
+) -> None:
+    from openpyxl import load_workbook
+
+    workbook_path = tmp_path / "readable.xlsx"
+    reporting.write_excel_workbook(
+        workbook_path,
+        {
+            "comparison_results": [
+                {
+                    "query_name": "AS_demo",
+                    "mismatch_positions_in_query_1based": "1;21",
+                    "differences": "1:A>U; 21:A>U",
+                }
+            ]
+        },
+    )
+
+    worksheet = load_workbook(workbook_path)["comparison_results"]
+
+    assert worksheet.column_dimensions["A"].width >= len("query_name") + 2
+    assert worksheet.column_dimensions["B"].width >= len(
+        "mismatch_positions_in_query_1based"
+    ) + 2
+    assert worksheet.column_dimensions["C"].width >= len("1:A>U; 21:A>U") + 2
+
+
 def test_input_query_rows_preserve_noncanonical_source_fields() -> None:
     query = AntisenseQuery(
         name="AS_demo",

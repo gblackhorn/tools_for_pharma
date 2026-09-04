@@ -15,7 +15,14 @@ from tools_for_pharma.oligo.transcript_scan.gui import run_gui
 
 
 APP_NAME = "Transcript Scan"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
+REQUIRED_DISTRIBUTION_FILES = (
+    "TranscriptScan.exe",
+    "README_TRANSCRIPT_SCAN.txt",
+    "THIRD_PARTY_NOTICES.txt",
+    "VERSION.txt",
+    "multiple_sequence_blast_template.xlsx",
+)
 
 
 class _LoggerStream:
@@ -69,6 +76,23 @@ def run_self_test() -> int:
         raise RuntimeError("Packaged GUI/workflow imports are incomplete.")
 
     data_dir = application_data_dir()
+    if getattr(sys, "frozen", False):
+        app_dir = data_dir.parent
+        missing = [
+            name
+            for name in REQUIRED_DISTRIBUTION_FILES
+            if not (app_dir / name).is_file()
+        ]
+        if missing:
+            raise RuntimeError(
+                "Packaged distribution files are missing: " + ", ".join(missing)
+            )
+        version_text = (app_dir / "VERSION.txt").read_text(encoding="utf-8").strip()
+        if version_text != f"{APP_NAME} {APP_VERSION}":
+            raise RuntimeError(
+                f"Packaged version mismatch: expected {APP_NAME} {APP_VERSION}; "
+                f"found {version_text or '<blank>'}."
+            )
     data_dir.mkdir(parents=True, exist_ok=True)
     shared_gui_transcript_cache_dir().mkdir(parents=True, exist_ok=True)
     workbook_path = data_dir / ".packaged_self_test.xlsx"
