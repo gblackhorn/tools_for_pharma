@@ -708,7 +708,7 @@ refactor: finalize ncbi blast compatibility facade
 
 ### Phase 12 — Release-candidate packaging and documentation
 
-Status: [ ]
+Status: [x]
 
 Goal: prove that the refactored source and standalone application are ready for
 the colleague distribution workflow.
@@ -758,7 +758,7 @@ and any approved deviation from the roadmap.
 | 9. CLI | Complete | `3843ba5` | 197 tests; 109 focused CLI/facade/workflow/reporting tests; CLI help; direct AS, SS, pasted-target, local-file, cached-accession, and table paths; mocked remote-BLAST dispatch; both GUI batch launch commands inspected | Added `transcript_scan/cli.py` for parsing, validation, dispatch, and explicit workflow-config adapters; preserved `ncbi_blast.main()` and module execution plus compatibility re-exports; the CLI layer has no Tkinter or compatibility-facade dependency; `ncbi_blast.py` reduced from 2,417 to 1,500 lines. Per the lean roadmap, no live private-query submission, Windows GUI control, Gate P, or package build was performed. |
 | 10. GUI/portable services | Complete | `d42a44f` | 204 tests; 102 focused GUI/facade/CLI tests; CLI help; clean PyInstaller build; packaged self-test exit 0; required distribution files present; user-operated single pasted-target/Edit-and-run-again and multiple-workbook checks passed | Added `transcript_scan/gui.py` and `app_services.py`; the packaged entry point imports the extracted GUI, portable paths, and workflow modules directly and its self-test covers those imports; compatibility re-exports and module execution remain intact; `ncbi_blast.py` reduced from 1,500 to 23 lines. PyInstaller discovered the extracted modules statically, so the specification needed no change. The build required execution outside the filesystem sandbox so native Tcl/Tk discovery could read its installed library files. |
 | 11. Compatibility facade | Complete | `442db92` | 205 tests; 130 focused facade/domain/target/reporting/workflow/CLI/GUI tests; CLI help; repository caller audit; compatibility import and identity contracts | Replaced the temporary wildcard facade with 106 explicit documented exports and `__all__`; all 47 names statically used by repository callers are covered; module execution and GUI dispatch remain compatible; documentation now distinguishes local accession-based scanning from explicit remote query submission; `ncbi_blast.py` is 199 lines. Gate P and manual GUI validation were not repeated because the packaged entry point imports extracted modules directly, as planned. |
-| 12. Release package | Not started | | | |
+| 12. Release package | Complete | `5aef9af` | 209 tests; CLI help; clean PyInstaller build; packaged self-test exit 0; user-operated full manual matrix from copied folder; workbook schema/formula/visual checks; clean release ZIP audit | Released version 1.1.1 as `dist\TranscriptScan-1.1.1-Windows-x64.zip` (43,317,366 bytes; SHA-256 `BFEA32CA589FDBA29007A5C14C80C9FAEEF4991E8BDD608B483A8B9D84B321DF`); ZIP contains no portable user data, cache, logs, settings, or manual-test files; generated workbook columns are sized for readable headers. |
 
 ## Per-phase working protocol
 
